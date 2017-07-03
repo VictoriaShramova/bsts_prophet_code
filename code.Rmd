@@ -1,0 +1,2254 @@
+---
+title: "Анализ и прогнозирование временных рядов в BSTS и Prophet"
+subtitle: "An implementation in R Markdown"
+author: "Шрамова Виктория"
+date: "`r Sys.Date()`"
+header-includes:
+   - \usepackage{listings}
+   - \usepackage{color}   
+   - \lstset{
+      language=R,                     
+      basicstyle=\tiny\ttfamily, 
+      numbers=left,                   
+      numberstyle=\tiny\color{Blue},  
+      stepnumber=1,                   
+                                      
+      numbersep=5pt,                  
+      backgroundcolor=\color{white},  
+      showspaces=false,               
+      showstringspaces=false,        
+      showtabs=false,                 
+      frame=single,                   
+      rulecolor=\color{black},         
+      tabsize=2,                     
+      captionpos=b,                  
+      breaklines=true,                
+      breakatwhitespace=false,        
+      keywordstyle=\color{RoyalBlue},     
+      commentstyle=\color{YellowGreen},   
+      stringstyle=\color{ForestGreen}      
+      } 
+   - \setmainfont{Times New Roman} 
+output:
+  tufte::tufte_handout:
+    keep_tex: true
+    citation_package: natbib
+    latex_engine: xelatex
+  tufte::tufte_book:
+    citation_package: natbib
+    latex_engine: xelatex
+polyglossia-lang: russian
+bibliography: Bibliography.bib
+link-citations: yes
+fig_caption: yes
+---
+
+
+```{r setup, include=FALSE}
+library(tufte)
+# invalidate cache when the tufte version changes
+knitr::opts_chunk$set(tidy = FALSE, cache.extra = packageVersion('tufte'))
+options(htmltools.dir.version = FALSE)
+
+```
+\global\marginparsep=33pt
+\selectlanguage{russian}
+
+# Введение
+
+Стандартным методом анализа временных рядов является построение \foreignlanguage{english}{\textit{ARIMA}} -моделей (autoregressive integrated moving average)^[Box, George; Jenkins, Gwilym (1970). *Time Series Analysis: Forecasting and Control*. San Francisco: Holden-Day.], которые являются обобщением \foreignlanguage{english}{\textit{ARMA}}-моделей для работы с нестационарными временными рядами. Формально модель _ARIMA(p, d, q)_ можно определить следующим образом:
+\[\Delta^d y_t = \gamma + \sum_{i=1}^{p} \alpha_i \Delta^d y_{t-i} + 
+                  \sum_{j=1}^{q} \beta_j \varepsilon_{t-j} +\varepsilon_t,\]
+                  
+
+   
+где $y_t$ --- нестационарный временной ряд, $\varepsilon_t$ --- случайная ошибка (белый шум), $\gamma, \alpha_i,\beta_j$ --- параметры модели (неизвестные константы, которые нужно оценить), $\Delta^d$ --- оператор разности порядка $d$, воздействие которого на $y_t$ делает ряд стационарным (при $d=0$ получаем _ARMA_-модель).   
+
+Несмотря на универсальность и хорошее качество подгонки _ARIMA_- моделей, данный метод зачастую вызывает сложности интерпретации результатов из-за необходимости дифференцирования временного ряда. Также невозможно выделить и анализировать компоненты, лежащие в основе структуры исходного временного ряда (модель _ARIMA_ создаёт стационарный временной ряд, удаляя тренд и сезонность изначального ряда). 
+
+В данной работе предлагается рассмотреть модели байесовских структурных временных рядов как альтернативный метод моделирования и прогнозирования временных рядов. Реализация данных моделей осуществлена в пакетах BSTS и Prophet языка программирования R, более подробно о них будет рассказано ниже. Однако стоит отметить, что оба пакета основаны на моделях байесовских структурных временных рядов и различаются лишь в том, на какие компоненты раскладывается временной ряд, и способе моделирования данных компонент. Качество прогнозов, получаемых данными методами, будет сравниваться с помощью метрики _RMSE_:
+
+\[RMSE = \bigg(\frac{1}{n} \sum_{t=1}^{n} (A_t-F_t)^2\bigg)^{\frac{1}{2}}, \]
+
+где $A_t$ --- истинное значение временного ряда в момент времени $t$; $F_t$ --- прогнозное значение временного ряда в момент времени $t$.
+
+
+# Пакет BSTS и модели структурных временных рядов
+
+Пакет BSTS^[Автор: Steven L. Scott, Google] предназначен для работы с моделями байесовских структурных временных рядов. Данные модели представляют собой модели регрессии, в которых объясняющие переменные являются функциями от времени, с возможностью указания априорного распределения переменных и их параметров. Иными словами, в байесовских структурных моделях такие ненаблюдаемые элементы, как тренд, сезонность, случайные ошибки и другие релевантные компоненты явно моделируются и анализируются. Данный метод противопоставляется философии _ARIMA_-моделей, где тренд и сезонность ряда явно не моделируются.
+
+Базовая структурная модель может быть представлена в виде: ^[A. C. Harvey and N. Shephard. *Structural time series models*. In G. Maddala, C. Rao, and H. Vinod, editors, Handbook of Statistics, vol. 11, ch. 10, p. 261–302. Elsevier, 1993.]
+
+\begin{equation}\label{eq1.1} \tag{1.1}
+y_t = \mu_t + \gamma_t + \varepsilon_t,\;\; t = 1, \ldots, T
+\end{equation}
+
+где $\mu_t$ --- тренд, $\gamma_t$ --- сезонная компонента, $\varepsilon_t$ --- случайная ошибка ($\varepsilon_t \sim WN(0, \sigma_{\varepsilon}^2)$).
+
+```{marginfigure}
+Здесь и далее $WN(0, \sigma^2)$ будет обозначать процесс белого шума. 
+```
+
+В зависимости от спецификации модели из уравнения \eqref{eq1.1} можно исключать отдельные компоненты или добавлять новые (например, авторегрессионную составляющую). Далее будут представлены примеры возможных спецификаций модели.
+
+## Локальный уровень
+
+Модель локального уровня имеет вид: 
+\begin{equation}\label{eq1.2} \tag{1.2}
+y_t = \mu_t + \varepsilon_t,\;\; \varepsilon_t \sim WN(0, \sigma_{\varepsilon}^2)
+\end{equation}
+
+\begin{equation}\label{eq1.3} \tag{1.3}
+\mu_{t}=\mu_{t-1} + \eta_t, \;\;\eta_t \sim WN(0, \sigma_{\eta}^2) 
+\end{equation}
+
+Уравнение \eqref{eq1.3} представляет собой случайное блуждание и задаёт локальный уровень (следующее значение уровня повторяет предыдущее с некоторой ошибкой), уравнение \eqref{eq1.2} задаёт временной ряд как локальный уровень с некоторой случайной ошибкой $\varepsilon_t$. 
+
+_Априорное распределение в пакете BSTS:_
+
+```{marginfigure}
+Параметры $\tau^2$ и $\nu$ (соответственно, $\alpha$ и $\beta$) можно задать внутри функции  _AddLocalLevel()_ в аргументе _sigma.prior_ (NULL по умолчанию), который является объектом класса _SdPrior_. Для этого при инициализации  _sigma.prior_ определяется числовой аргумент _sigma.guess_ (для $\tau$, принимает только положительные значения), в котором указывается априорное мнение о величине стандартного отклонения $\sigma$, и числовой аргумент _sample.size_ (для $\nu$, принимает положительные, но не обязательно целые значения), в котором указывается степень нашей уверенности в априорной величине $\sigma$ (как если бы оценка априорной величины $\sigma$ рассчитывалась по $n=$_sample.size_ наблюдениям: чем больше $n$, тем точнее оценка и больше наша уверенность в априорной величине $\sigma$). Например, для $\tau^2=4$ и $\nu=3$ (соответственно, для $\alpha=6,\; \beta=1.5$): sigma.prior = SdPrior(_sigma.guess_ = 2, _sample.size_ = 3).
+
+```
+
+Добавление локального уровня производится с помощью функции \foreignlanguage{english}{\textit{AddLocalLevel()}}, при этом предполагается, что
+
+1) $\sigma_{\eta}^2\sim IG(\alpha,\beta)$ --- имеет обратное Гамма-распределение и $\eta_t|\sigma^2_{\eta} \sim N(0, \sigma_{\eta}^2)$. Из-за того, что $\eta_t|\sigma^2_{\eta} \sim N(0, \sigma_{\eta}^2)$, априорное распределение дисперсии ошибки $\sigma_{\eta}^2$ можно выразить через масштабированное обратное Хи-квадрат распределение (Scaled inverse chi-squared distribution): $\sigma_{\eta}^2\sim \chi^2_{ScI}(\nu, \tau^2)$, причём через его параметры можно выразить параметры обратного Гамма-распределения: $\alpha=\frac{\nu\tau^2}{2}, \; \beta=\frac{\nu}{2}$. Таким образом, $\sigma_{\eta}^2\sim \chi^2_{ScI}(\nu, \tau^2) \Leftrightarrow \sigma_{\eta}^2\sim IG(\frac{\nu\tau^2}{2},\frac{\nu}{2})$.
+
+2) Начальное значение уровня имеет нормальное распределение:
+
+$\mu_0\sim N(\mu, \sigma^2)$.
+
+```{marginfigure}
+Параметры $\mu$ и $\sigma$ можно задать внутри функции _AddLocalLevel()_ в аргументе _initial.state.prior_ (NULL по умолчанию), который является объектом класса _NormalPrior_. Для этого при инициализации  _initial.state.prior_ определяется числовой аргумент _mu_, в котором указывается априорное мнение о величине математического ожидания $\mu$, и числовой аргумент _sigma_, в котором указывается априорное мнение о величине стандартного отклонения $\sigma$. Например, для $\mu=2$ и $\sigma=1$: initial.state.prior = NormalPrior(mu = 2, sigma = 1).
+```
+
+\newpage
+_Дефолтные значения аргументов функции AddLocalLevel():_  
+
+```{marginfigure}
+\begin{lstlisting}[language=R]
+AddLocalLevel <- function(
+          state.specification = NULL,
+          y,
+          sigma.prior = NULL,
+          initial.state.prior = NULL,
+          sdy,
+          initial.y)
+\end{lstlisting}
+```
+
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+library("lubridate")  
+library("xts") 
+library('dplyr')
+library('prophet')
+library('bsts')
+library('ggplot2')
+
+rand<- read.csv("dates.csv", sep = ",", dec = '.', header = TRUE,
+                stringsAsFactors = FALSE)
+rand$Year <- as.Date(rand$Year,format = "%Y-%m-%d")
+set.seed(2016)
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# generate random walk
+rand$rand <- arima.sim(list(order = c(0,1,0)), n = length(rand$Year)-1)
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+training_cut_date <- as.Date(as.character("1920-01-01"),format = "%Y-%m-%d")
+data_train <- rand[rand$Year <= training_cut_date,]
+yts <- xts(data_train$rand, order.by=data_train$Year)
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# fit BSTS with local level
+ss <- AddLocalLevel(list(), yts)
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+model <- bsts(yts, state.specification = ss, niter = 500, seed=2016)
+burn <- SuggestBurn(0.1, model)
+# BSTS predictions
+pred <- predict(model, horizon = 2, burn = burn, quantiles = c(.025, .975))
+# actual versus fitted data
+d2 <- data.frame(c(-colMeans(model$one.step.prediction.errors[-(1:burn),])+coredata(yts),pred$mean),
+                 as.numeric(rand$rand), as.Date(rand$Year))
+names(d2) <- c("Fitted", "Actual", "Date")
+# RMSE 
+RMSE_bs <- filter(d2, year(Date)>1920) %>% summarise(RMSE=(mean((Actual-Fitted)^2))^(1/2))
+
+# make posterior intervals
+posterior.interval <- cbind.data.frame(
+  pred$interval[1,],pred$interval[2,],subset(d2,year(Date)>1920)$Date)
+names(posterior.interval) <- c("LL", "UL", "Date")
+
+# join intervals to the forecast
+d3 <- left_join(d2, posterior.interval, by="Date")
+
+# Plot actual versus predicted with credible intervals for the holdout period
+
+g1 <- ggplot(data=d3, aes(x=Date)) +
+  geom_line(aes(y=Actual, color='#00FF00'),size=0.2) +
+  geom_line(aes(y=Fitted, color='#FF0000'), linetype=2,size=0.2) +
+  theme_bw()+ ylab("Random walk") + xlab("") +
+  geom_vline(xintercept=as.numeric(as.Date("1920-01-01")), linetype=2,size=0.2) + 
+  geom_ribbon(aes(ymin=LL, ymax=UL), fill="grey", alpha=0.5) +
+  ggtitle(paste0("BSTS -- Holdout RMSE = ", round(RMSE_bs,2))) +
+  theme(axis.text.x=element_text(hjust = 0), legend.position = 'none',text=element_text(size=6))
+```
+
+```{marginfigure}
+\begin{lstlisting}[language=R]
+# generate random walk
+rand$rand <- arima.sim(list(order = c(0,1,0)), n = length(rand$Year)-1)
+training_cut_date <- as.Date(as.character("1920-01-01"),format = "%Y-%m-%d")
+data_train <- rand[rand$Year <= training_cut_date,]
+yts <- xts(data_train$rand, order.by=data_train$Year)
+# fit BSTS with local level
+ss <- AddLocalLevel(list(), yts)
+model <- bsts(yts, state.specification = ss, niter = 500)
+\end{lstlisting}
+```
+
+```{r fig.margin = TRUE, fig.cap= '\\label{fig:fig4} Example of Local level (1.2), (1.3) ', fig.width=3, fig.height=2.5, echo=FALSE,message=FALSE, warning=FALSE}
+g1
+```
+
+
+```{r,  eval=FALSE}
+# sdy is standard deviation of the time series
+# if sdy, initial.y are ignored
+sdy <- sd(y, na.rm = TRUE)
+initial.y <- y[1]
+# if sigma.prior = NULL
+# default sample.size = .01
+sigma.prior <- SdPrior(sigma.guess = .01 * sdy, 
+                       upper.limit = sdy) 
+# if initial.state.prior = NULL
+initial.state.prior <- NormalPrior(mu = initial.y, 
+                                   sigma = sdy)
+```
+
+## Локальный линейный тренд
+
+Модель локального линейного тренда имеет вид: 
+ 
+\[y_t = \mu_t + \varepsilon_t,\;\; \varepsilon_t \sim WN(0, \sigma_{\varepsilon}^2)\]
+
+
+\begin{equation}\label{eq1.4} \tag{1.4}
+\mu_{t}=\mu_{t-1} + \beta_{t-1} + \eta_t, \;\;\eta_t \sim WN(0, \sigma_{\eta}^2) 
+\end{equation}
+
+\begin{equation}\label{eq1.5} \tag{1.5} 
+\beta_{t}=\beta_{t-1} + \zeta_t, \;\;\zeta_t \sim WN(0, \sigma_{\zeta}^2) 
+\end{equation}
+
+Уравнения \eqref{eq1.4} и \eqref{eq1.5} задают стохастический тренд: случайные составляющие $\eta_t$ и $\zeta_t$ позволяют меняться во времени уровню и наклону тренда соответственно. Уравнение ряда представляет собой стохастический тренд с некоторым случайным отклонением $\varepsilon_t$. Заметим, что чем больше значения дисперсий $\sigma_{\eta}^2$ и $\sigma_{\zeta}^2$, тем сильнее случайные отклонения от тренда. Если $\sigma_{\eta}^2=\sigma_{\zeta}^2=0$, то получается частный случай детерминированного линейного тренда.
+
+```{marginfigure}
+представимого как $\mu_t=\alpha +\beta t$ или $\mu_t=\mu_{t-1}+\beta$
+```
+
+_Априорное распределение в пакете BSTS:_
+
+Добавление локального линейного тренда производится с помощью функции _AddLocalLinearTrend()_, при этом предполагается, что
+
+1) $\sigma^2_{\eta}\sim IG(\alpha_\eta,\beta_\eta),\; \sigma^2_{\zeta}\sim IG(\alpha_\zeta,\beta_\zeta)$ и $\eta_t|\sigma^2_{\eta}  \sim N(0, \sigma_{\eta}^2),\;\zeta_t|\sigma^2_{\zeta}  \sim N(0, \sigma_{\zeta}^2)$.
+
+```{marginfigure}
+Параметры $\alpha_\eta$ и $\beta_\eta$ можно задать в аргументе _level.sigma.prior_ (NULL по умолчанию), $\alpha_\zeta$ и $\beta_\zeta$ можно задать в аргументе _slope.sigma.prior_ (NULL по умолчанию). 
+```
+
+2) Начальные значения уровня и наклона тренда имеют нормальное распределение:
+
+$\mu_0\sim N(\mu, \sigma_{\mu}^2),\;\beta_0\sim N(\beta, \sigma_{\beta}^2)$. 
+
+```{marginfigure}
+Параметры $\mu$ и $\sigma_{\mu}$ можно задать в аргументе _initial.level.prior_ (NULL по умолчанию), $\beta$ и $\sigma_{\beta}$ можно задать в аргументе _initial.slope.prior_ (NULL по умолчанию).
+```
+
+\newpage
+_Дефолтные значения аргументов функции AddLocalLinearTrend():_  
+
+```{marginfigure}
+\begin{lstlisting}[language=R]
+AddLocalLinearTrend <- function (
+          state.specification = NULL,
+          y,
+          level.sigma.prior = NULL,
+          slope.sigma.prior = NULL,
+          initial.level.prior = NULL,
+          initial.slope.prior = NULL,
+          sdy,
+          initial.y)
+\end{lstlisting}
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# make data
+# export in Australia
+aust <- read.csv("quarterly-australian-national-ac.csv", sep = ",", dec = '.', header = TRUE,
+                  stringsAsFactors = FALSE)
+aust$Quarter <- as.Date(aust$Quarter,format = "%Y-%m-%d")
+
+# make train data
+training_cut_date <- as.Date(as.character("1993-10-01"),format = "%Y-%m-%d")
+data_train <- aust[aust$Quarter <= training_cut_date,]
+yts <- xts(data_train$exports, order.by=data_train$Quarter)
+
+# fit BSTS with trend only
+ss <- AddLocalLinearTrend(list(), yts)
+model <- bsts(yts, state.specification = ss, niter = 500, seed=2016)
+burn <- SuggestBurn(0.1, model)
+# BSTS predictions
+pred <- predict(model, horizon = 7, burn = burn, quantiles = c(.025, .975))
+
+# actual versus fitted data
+d2 <- data.frame(c(-colMeans(model$one.step.prediction.errors[-(1:burn),])+coredata(yts),pred$mean),
+                 as.numeric(aust$exports), as.Date(aust$Quarter))
+names(d2) <- c("Fitted", "Actual", "Date")
+# RMSE 
+RMSE_bs <- filter(d2, year(Date)>1993) %>% summarise(RMSE=(mean((Actual-Fitted)^2))^(1/2))
+#bsts_rmse_q <- c(bsts_rmse_q, RMSE_bs)
+# make posterior intervals
+posterior.interval <- cbind.data.frame(
+  pred$interval[1,],pred$interval[2,],subset(d2, year(Date)>1993)$Date)
+names(posterior.interval) <- c("LL", "UL", "Date")
+
+# join intervals to the forecast
+d3 <- left_join(d2, posterior.interval, by="Date")
+
+# Plot actual versus predicted with credible intervals for the holdout period
+g1 <- ggplot(data=d3, aes(x=Date)) +
+  geom_line(aes(y=Actual, color='#00FF00'),size=0.3) +
+  geom_line(aes(y=Fitted, color='#FF0000'), linetype=2,size=0.3) +
+  theme_bw()+ ylab("Export") + xlab("") +
+  geom_vline(xintercept=as.numeric(as.Date("1993-10-01"),size=0.2), linetype=2) + 
+  geom_ribbon(aes(ymin=LL, ymax=UL), fill="grey", alpha=0.5) +
+  ggtitle(paste0("BSTS -- Holdout RMSE = ", round(RMSE_bs,2))) +
+  theme(axis.text.x=element_text(hjust = 0), legend.position = 'none',text=element_text(size=6))
+
+```
+
+```{marginfigure}
+\begin{lstlisting}[language=R]
+# aust - export in Australia
+# make train data
+training_cut_date <- as.Date(as.character("1993-10-01"),format = "%Y-%m-%d")
+data_train <- aust[aust$Quarter <= training_cut_date,]
+yts <- xts(data_train$exports, order.by=data_train$Quarter)
+# fit BSTS with trend only
+ss <- AddLocalLinearTrend(list(), yts)
+model <- bsts(yts, state.specification = ss, niter = 500)
+\end{lstlisting}
+```
+
+```{r fig.margin = TRUE, fig.cap= '\\label{fig:fig5} Example of Local linear trend (1.4), (1.5) ', fig.width=3, fig.height=2.5, echo=FALSE,message=FALSE, warning=FALSE}
+g1
+```
+
+```{marginfigure}
+[(источник данных)](https://datamarket.com/data/set/22my/quarterly-australian-national-accounts-exports-millions-of-dollars-at-198990-prices-sep-59-jun-95#!ds=22my&display=line)
+```
+
+```{r,  eval=FALSE}
+# if sdy, initial.y are ignored
+sdy <- sd(y, na.rm = TRUE)
+initial.y <- y[1]
+# if level.sigma.prior = NULL
+# default sample.size = .01
+level.sigma.prior <- SdPrior(.01 * sdy, upper.limit = sdy)
+# if slope.sigma.prior = NULL
+slope.sigma.prior <- SdPrior(.01 * sdy, upper.limit = sdy)
+#if initial.level.prior = NULL
+initial.level.prior <- NormalPrior(initial.y, sdy)
+#if initial.slope.prior = NULL
+initial.slope.prior <- NormalPrior(0, sdy)
+```
+
+
+## Полулокальный линейный тренд
+
+Данная модель похожа на модель локального линейного тренда, однако более эффективна для долгосрочного прогнозирования. В ней предполагается, что уровень тренда изменяется согласно процессу случайного блуждания (как и для локального линейного тренда), но наклон тренда изменяется согласно _AR(1)_-процессу, центрированному относительно некоторого ненулевого значения $D$ (долгосрочный наклон тренда). таким образом, модель имеет вид: 
+
+\[y_t = \mu_t + \varepsilon_t,\;\; \varepsilon_t \sim WN(0, \sigma_{\varepsilon}^2)\]
+
+
+\begin{equation}\label{eq1.6} \tag{1.6}
+\mu_{t}=\mu_{t-1} + \delta_{t-1} + \eta_t, \;\;\eta_t \sim WN(0, \sigma_{\eta}^2) 
+\end{equation}
+
+\begin{equation}\label{eq1.7} \tag{1.7} 
+\delta_{t}=D+\phi(\delta_{t-1}-D)+ \zeta_t, \;\;\zeta_t \sim WN(0, \sigma_{\zeta}^2),
+\end{equation}
+
+где $\phi$ --- коэффициент при _AR(1)_-процессе.
+
+
+_Априорное распределение в пакете BSTS:_
+
+Добавление полулокального линейного тренда производится с помощью функции _AddSemilocalLinearTrend()_, при этом предполагается, что
+
+```{marginfigure}
+Параметры $\alpha_\eta$ и $\beta_\eta$ можно задать в аргументе _level.sigma.prior_ (NULL по умолчанию), $\alpha_\zeta$ и $\beta_\zeta$ можно задать в аргументе _slope.sigma.prior_ (NULL по умолчанию). 
+```
+
+1)  $\sigma^2_{\eta}\sim IG(\alpha_\eta,\beta_\eta),\; \sigma^2_{\zeta}\sim IG(\alpha_\zeta,\beta_\zeta)$ и $\eta_t|\sigma^2_{\eta}  \sim N(0, \sigma_{\eta}^2),\;\zeta_t|\sigma^2_{\zeta}  \sim N(0, \sigma_{\zeta}^2)$. 
+
+
+2) Начальные значения уровня и наклона тренда имеют нормальное распределение:
+
+```{marginfigure}
+Параметры $\mu$ и $\sigma_{\mu}$ можно задать в аргументе _initial.level.prior_ (NULL по умолчанию), $\delta$ и $\sigma_{\delta}$ можно задать в аргументе _initial.slope.prior_ (NULL по умолчанию). 
+```
+
+$\mu_0\sim N(\mu, \sigma_{\mu}^2),\;\delta_0\sim N(\delta, \sigma_{\delta}^2)$. 
+
+```{marginfigure}
+Параметры $d$ и $\sigma_{d}$ можно задать в аргументе _slope.mean.prior_ (NULL по умолчанию).
+```
+
+3) Долгосрочный наклон тренда $D$ имеет нормальное распределение: $D\sim N(d, \sigma_{d}^2)$.
+
+4) Коэффициент _AR(1)_- процесса $\phi$ имеет усечённое нормальное распределение, то есть $\phi\sim N(\phi_0, \sigma_{\phi}^2)$ на интервале $(a,b)$. Если априорно ограничить значения $\phi$ интервалом $(-1,1)$, то наклон тренда будет демонстрировать краткосрочные стационарные отклонения от долгосрочного наклона $D$.
+
+```{marginfigure}
+Указанные параметры можно задать внутри функции _AddSemilocalLinearTrend()_ в аргументе _slope.ar1.prior_ (NULL по умолчанию), который является объектом класса _Ar1CoefficientPrior_: при инициализации _slope.ar1.prior_ $\phi_0$ задаётся через аргумент _mu_ ( _mu_ = 0 по умолчанию), $\sigma_{\phi}$ задаётся через аргумент _sigma_ ( _sigma_ = 1 по умолчанию), ограничение $\phi$ интервалом $(-1,1)$ задаётся с помощью _force.stationary_ = TRUE (TRUE по умолчанию), а чтобы $\phi$ принимал только неотрицательные значения, нужно присвоить аргументу _force.positive_ значение TRUE (FALSE по умолчанию). Например, для $\phi \in (0,1),\; \phi_0=0.5,\;  \sigma_{\phi}^2 = 0.01$: slope.ar1.prior = Ar1CoefficientPrior(mu = 0.5, sigma = 0.1, force.positive = TRUE).
+
+```
+
+```{marginfigure}
+\begin{lstlisting}[language=R]
+AddSemilocalLinearTrend <- function (
+          state.specification = list(),
+          y = NULL,
+          level.sigma.prior = NULL,
+          slope.mean.prior = NULL,
+          slope.ar1.prior = NULL,
+          slope.sigma.prior = NULL,
+          initial.level.prior = NULL,
+          initial.slope.prior = NULL,
+          sdy = NULL,
+          initial.y = NULL)
+
+\end{lstlisting}
+```
+
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# make data
+# export in Australia
+aust <- read.csv("quarterly-australian-national-ac.csv", sep = ",", dec = '.', header = TRUE,
+                  stringsAsFactors = FALSE)
+aust$Quarter <- as.Date(aust$Quarter,format = "%Y-%m-%d")
+
+# make train data
+training_cut_date <- as.Date(as.character("1993-10-01"),format = "%Y-%m-%d")
+data_train <- aust[aust$Quarter <= training_cut_date,]
+yts <- xts(data_train$exports, order.by=data_train$Quarter)
+
+# fit BSTS with trend only
+ss <- AddSemilocalLinearTrend(list(), yts)
+model <- bsts(yts, state.specification = ss, niter = 500, seed=2016)
+burn <- SuggestBurn(0.1, model)
+# BSTS predictions
+pred <- predict(model, horizon = 7, burn = burn, quantiles = c(.025, .975))
+
+# actual versus fitted data
+d2 <- data.frame(c(-colMeans(model$one.step.prediction.errors[-(1:burn),])+coredata(yts),pred$mean),
+                 as.numeric(aust$exports), as.Date(aust$Quarter))
+names(d2) <- c("Fitted", "Actual", "Date")
+# RMSE
+RMSE_bs <- filter(d2, year(Date)>1993) %>% summarise(RMSE=(mean((Actual-Fitted)^2))^(1/2))
+#bsts_rmse_q <- c(bsts_rmse_q, RMSE_bs)
+# make posterior intervals
+posterior.interval <- cbind.data.frame(
+  pred$interval[1,],pred$interval[2,],subset(d2, year(Date)>1993)$Date)
+names(posterior.interval) <- c("LL", "UL", "Date")
+
+# join intervals to the forecast
+d3 <- left_join(d2, posterior.interval, by="Date")
+
+# Plot actual versus predicted with credible intervals for the holdout period
+g1 <- ggplot(data=d3, aes(x=Date)) +
+  geom_line(aes(y=Actual, color='#00FF00'),size=0.3) +
+  geom_line(aes(y=Fitted, color='#FF0000'), linetype=2,size=0.3) +
+  theme_bw()+ ylab("Export") + xlab("") +
+  geom_vline(xintercept=as.numeric(as.Date("1993-10-01"),size=0.2), linetype=2) + 
+  geom_ribbon(aes(ymin=LL, ymax=UL), fill="grey", alpha=0.5) +
+  ggtitle(paste0("BSTS -- Holdout RMSE = ", round(RMSE_bs,2))) +
+  theme(axis.text.x=element_text(hjust = 0), legend.position = 'none',text=element_text(size=6))
+
+```
+
+```{marginfigure}
+\begin{lstlisting}[language=R]
+# aust - export in Australia
+# make train data
+training_cut_date <- as.Date(as.character("1993-10-01"),format = "%Y-%m-%d")
+data_train <- aust[aust$Quarter <= training_cut_date,]
+yts <- xts(data_train$exports, order.by=data_train$Quarter)
+# fit BSTS with trend only
+ss <- AddSemilocalLinearTrend(list(), yts)
+model <- bsts(yts, state.specification = ss, niter = 500)
+\end{lstlisting}
+```
+
+```{r fig.margin = TRUE, fig.cap= '\\label{fig:fig5} Example of Semilocal linear trend (1.6), (1.7) ', fig.width=3, fig.height=2.5, echo=FALSE,message=FALSE, warning=FALSE}
+g1
+```
+
+```{marginfigure}
+[(источник данных)](https://datamarket.com/data/set/22my/quarterly-australian-national-accounts-exports-millions-of-dollars-at-198990-prices-sep-59-jun-95#!ds=22my&display=line)
+```
+
+_Дефолтные значения аргументов функции AddSemilocalLinearTrend():_  
+
+Значения аргументов, совпадающих с аргументами функции \foreignlanguage{english}{\textit{AddlocalLinearTrend()}}, по умолчанию присваиваются такими же, для остальных аргументов:
+
+```{r,  eval=FALSE}
+# if sdy, initial.y are ignored
+sdy <- sd(y, na.rm = TRUE)
+initial.y <- y[1]
+# sdy is standard deviation of the time series
+# if slope.mean.prior = NULL
+slope.mean.prior <- NormalPrior(0, sdy)
+# if slope.ar1.prior = NULL
+slope.ar1.prior <- Ar1CoefficientPrior(mu = 0, sigma = 1, 
+force.stationary = TRUE, force.positive = FALSE, 
+                              initial.value = mu)
+```
+
+
+## Сезонность 
+
+Модель детерминированной сезонности предполагает, что сезонные эффекты вместе нивелируют друг друга, то есть в сумме равны нулю. Однако можно позволить сезонным эффектам изменяться во времени, сделав их сумму равной случайному отклонению $\omega_t$ с нулевым математическим ожиданием и дисперсией $\sigma^2_{\omega}$. Тогда, если число сезонов равно $s$, 
+
+\begin{equation}\label{eq1.8} \tag{1.8}
+\sum_{j=0}^{s-1} \gamma_{t-j}=\omega_t \Leftrightarrow \gamma_t = -\sum_{j=1}^{s-1} \gamma_{t-j}+\omega_t
+\end{equation}
+
+структурная модель временного ряда представима в виде:
+
+\begin{equation}\label{eq1.9} \tag{1.9}
+y_t = \gamma_t + \varepsilon_t,\;\; \varepsilon_t \sim WN(0, \sigma_{\varepsilon}^2)
+\end{equation}
+
+\[\gamma_t = -\sum_{j=1}^{s-1} \gamma_{t-j}+\omega_t,\;\; \omega_t \sim WN(0, \sigma_{\omega}^2)\]
+
+где уравнение \eqref{eq1.9} моделирует временной ряд как сезонную компоненту с некоторой случайной ошибкой $\varepsilon_t$.
+
+_Априорное распределение в пакете BSTS:_
+
+Добавление сезонной компоненты производится с помощью функции \foreignlanguage{english}{\textit{AddSeasonal()}}, при этом предполагается, что
+
+```{marginfigure}
+Моделируемое количество сезонов можно задать в аргументе _nseasons_.
+```
+
+1) $\sigma^2_{\omega}\sim IG(\alpha_\omega,\beta_\omega)$ и $\omega_t|\sigma^2_{\omega} \sim N(0, \sigma_{\omega}^2)$. 
+
+```{marginfigure}
+Параметры $\alpha_\omega$ и $\beta_\omega$ можно задать в аргументе _sigma.prior_ (NULL по умолчанию).
+```
+
+
+2) Начальные значения вектора сезонной компоненты (первые $s$ значений вектора $\gamma_t$) имеют нормальное распределение:
+
+$\gamma_0,\dots,\gamma_{s-1}\sim N(\gamma, \sigma_{\gamma}^2)$.
+
+```{marginfigure}
+Параметры $\gamma$ и $\sigma_{\gamma}$ можно задать в аргументе _initial.state.prior_ (NULL по умолчанию).
+```
+
+```{marginfigure}
+\begin{lstlisting}[language=R]
+AddSeasonal <- function(
+          state.specification,
+          y,
+          nseasons,
+          season.duration = 1,
+          sigma.prior = NULL,
+          initial.state.prior = NULL,
+          sdy)
+
+\end{lstlisting}
+```
+
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# make data
+# number of lynx trapped
+lynx <- read.csv("annual-number-of-lynx-trapped-ma.csv", sep = ",", dec = '.', header = TRUE,
+                  stringsAsFactors = FALSE)
+lynx$Year <- as.Date(lynx$Year,format = "%Y-%m-%d")
+
+# make train data
+training_cut_date <- as.Date(as.character("1924-01-01"),format = "%Y-%m-%d")
+data_train <- lynx[lynx$Year <= training_cut_date,]
+yts <- xts(data_train$lynx, order.by=data_train$Year)
+
+# fit BSTS with seasonal component
+ss <- AddLocalLevel(list(), yts)
+ss <- AddSeasonal(ss, yts,nseasons=10)
+model <- bsts(yts, state.specification = ss, niter = 500, seed=2016)
+burn <- SuggestBurn(0.1, model)
+# BSTS predictions
+pred <- predict(model, horizon = 10, burn = burn, quantiles = c(.025, .975))
+
+# actual versus fitted data
+d2 <- data.frame(c(-colMeans(model$one.step.prediction.errors[-(1:burn),])+coredata(yts),pred$mean),
+                 as.numeric(lynx$lynx), as.Date(lynx$Year))
+names(d2) <- c("Fitted", "Actual", "Date")
+# RMSE 
+RMSE_bs <- filter(d2, year(Date)>1924) %>% summarise(RMSE=(mean((Actual-Fitted)^2))^(1/2))
+#bsts_rmse_y <- c(bsts_rmse_y, RMSE_bs)
+# make posterior intervals
+posterior.interval <- cbind.data.frame(
+  pred$interval[1,],pred$interval[2,],subset(d2, year(Date)>1924)$Date)
+names(posterior.interval) <- c("LL", "UL", "Date")
+
+# join intervals to the forecast
+d3 <- left_join(d2, posterior.interval, by="Date")
+
+# Plot actual versus predicted with credible intervals for the holdout period
+g1 <- ggplot(data=d3, aes(x=Date)) +
+  geom_line(aes(y=Actual, color='#00FF00'),size=0.3) +
+  geom_line(aes(y=Fitted, color='#FF0000'), linetype=2,size=0.3) +
+  theme_bw()+ ylab("Number of lynx trapped") + xlab("") +
+  geom_vline(xintercept=as.numeric(as.Date("1924-01-01"),size=0.2), linetype=2) + 
+  geom_ribbon(aes(ymin=LL, ymax=UL), fill="grey", alpha=0.5) +
+  ggtitle(paste0("BSTS -- Holdout RMSE = ", round(RMSE_bs,2))) +
+  theme(axis.text.x=element_text(hjust = 0), legend.position = 'none',text=element_text(size=6))
+
+```
+
+```{marginfigure}
+\begin{lstlisting}[language=R]
+# lynx - Number of lynx trapped
+# make train data
+training_cut_date <- as.Date(as.character("1924-01-01"),format = "%Y-%m-%d")
+data_train <- lynx[lynx$Year <= training_cut_date,]
+yts <- xts(data_train$lynx, order.by=data_train$Year)
+# fit BSTS with local level and seasonal component
+ss <- AddLocalLevel(list(), yts)
+ss <- AddSeasonal(ss, yts,nseasons=10)
+model <- bsts(yts, state.specification = ss, niter = 500)
+\end{lstlisting}
+```
+
+```{r fig.margin = TRUE, fig.cap= '\\label{fig:fig5} Example of Seasonal component (1.8), (1.9) with Local level', fig.width=3, fig.height=2.5, echo=FALSE,message=FALSE, warning=FALSE}
+g1
+```
+
+```{marginfigure}
+[(источник данных)](https://datamarket.com/data/set/22vj/annual-number-of-lynx-trapped-mackenzie-river-1821-1934#!ds=22vj&display=line)
+```
+
+```{marginfigure}
+Период колебаний, т.е. число периодов времени, необходимое для повторения наибольшего цикла, задаётся в переменной _period_ (например, для годового цикла _period_ = 12). Частоты колебаний $\lambda_j$, т.е. число повторений каждой циклической компоненты в течение периода, задаётся в параметре _frequencies_ в виде вектора положительных чисел.
+```
+
+```{marginfigure}
+\begin{lstlisting}[language=R]
+AddTrig <- function(
+          state.specification = NULL,
+          y,
+          period,
+          frequencies,
+          sigma.prior = NULL,
+          initial.state.prior = NULL,
+          sdy) 
+\end{lstlisting}
+```
+
+_Дефолтные значения аргументов функции AddSeasonal():_  
+
+```{r,  eval=FALSE}
+# if number of time periods each season is to last is ignored
+season.duration = 1
+# if sdy is ignored
+sdy <- sd(y, na.rm = TRUE)
+# sdy is standard deviation of the time series
+# if sigma.prior = NULL
+sigma.prior <- SdPrior(.01 * sdy, upper.limit = sdy)
+# if initial.state.prior = NULL
+initial.state.prior <- NormalPrior(0, sdy)
+```
+
+
+Сезонность также может быть задана через набор тригонометрических функций (а именно комбинаций $\sin$ и $\cos$) с сезонной частотой (измеряется в радианах) $\lambda_j=\frac{2\pi j}{s}, j=1,\ldots,[s/2],$ где $[s/2]=s/2,$ если $s$ чётное и $[s/2]=(s-1)/2,$ если $s$ нечётное. Тогда сезонный эффект в момент времени $t$ равен:
+
+\begin{equation}\label{eq1.10} \tag{1.10}
+\gamma_t = \sum_{j=1}^{[s/2]} (\gamma_j \cos \lambda_jt + \gamma_j^* \sin \lambda_jt)
+\end{equation}
+
+Так же как и в случае линейного тренда, уравнение сезонности \eqref{eq1.10} может быть задано рекурсивно, тогда структурная модель будет выглядеть следующим образом:
+\[y_t = \gamma_t + \varepsilon_t,\;\; \varepsilon_t \sim WN(0, \sigma_{\varepsilon}^2)\]
+\begin{equation}\label{eq1.11} \tag{1.11}
+\gamma_t = \sum_{j=1}^{[s/2]} \gamma_{j,t},
+\end{equation}
+
+\begin{equation}\label{eq1.12} \tag{1.12}
+  \begin{pmatrix}\gamma_{j,t} \\ \gamma_{j,t}^* \end{pmatrix} 
+  =
+  \begin{pmatrix} \cos \lambda_j &  \sin \lambda_j \\ -\sin \lambda_j & \cos \lambda_j \end{pmatrix} 
+  \begin{pmatrix} \gamma_{j,t-1} \\ \gamma_{j,t-1}^* \end{pmatrix}
+  +
+  \begin{pmatrix}\omega_{j,t} \\ \omega_{j,t}^* \end{pmatrix}
+\end{equation}
+
+где $\omega_{j,t}$ и $\omega_{j,t}^*,j=1,\ldots,[s/2]$ --- некоррелированные процессы белого шума с нулевым математическим ожиданием и общей дисперсией $\sigma_{\omega}^2$. Компонента $\gamma_{j,t}^*$ необходима для построения стохастической модели и не имеет важной интерпретации. 
+
+
+_Априорное распределение в пакете BSTS:_
+
+Добавление тригонометрической сезонной компоненты производится с помощью функции _AddTrig()_, при этом предполагается, что
+
+```{marginfigure}
+Параметры $\alpha_{\gamma_j}$ и $\beta_{\gamma_j}$ можно задать в аргументе _sigma.prior_ (NULL по умолчанию).
+```
+
+\newpage
+```{marginfigure}
+Параметры $\gamma$ и $\Sigma_{\gamma}$ можно задать в аргументе _initial.state.prior_ (NULL по умолчанию).
+```
+
+```{marginfigure}
+\begin{lstlisting}[language=R]
+# mean temperature, Fisher River
+data_train <- temp[temp$Date <= training_cut_date,]
+yts <- xts(data_train$temp, order.by=data_train$Date)
+# fit BSTS with trig only
+ss <- AddTrig(list(), yts,period=730,frequencies = 1)
+model <- bsts(yts, state.specification = ss, niter = 500)
+# BSTS predictions
+pred <- predict(model, horizon = 365, burn = burn, quantiles = c(.025, .975))
+# actual vs fitted data, abs values
+d2 <- data.frame(abs(c(...])...)
+\end{lstlisting}
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# mean temperature
+temp <- read.csv("mean-daily-temperature-fisher-ri.csv", sep = ",", dec = '.', header = TRUE,
+                  stringsAsFactors = FALSE)
+
+temp$Date <- as.Date(temp$Date,format = "%Y-%m-%d")
+# make train data
+training_cut_date <- as.Date(as.character("1990-12-31"),format = "%Y-%m-%d")
+data_train <- temp[temp$Date <= training_cut_date,]
+yts <- xts(data_train$temp, order.by=data_train$Date)
+# fit BSTS with trig only
+ss <- AddTrig(list(), yts,period=730,frequencies = 1)
+model <- bsts(yts, state.specification = ss, niter = 500, seed=2016)
+burn <- SuggestBurn(0.1, model)
+# BSTS predictions
+pred <- predict(model, horizon = 365, burn = burn, quantiles = c(.025, .975))
+
+# actual versus fitted data
+d2 <- data.frame(abs(c(-colMeans(model$one.step.prediction.errors[-(1:burn),])+coredata(yts),pred$mean)),
+                 as.numeric(temp$temp), as.Date(temp$Date))
+names(d2) <- c("Fitted", "Actual", "Date")
+# RMSE 
+RMSE_bs <- filter(d2, year(Date)>1990) %>% summarise(RMSE=(mean((Actual-Fitted)^2))^(1/2))
+# make posterior intervals
+posterior.interval <- cbind.data.frame(
+  pred$interval[1,],pred$interval[2,],subset(d2, year(Date)>1990)$Date)
+names(posterior.interval) <- c("LL", "UL", "Date")
+
+# join intervals to the forecast
+d3 <- left_join(d2, posterior.interval, by="Date")
+g1 <- ggplot(data=d3, aes(x=Date)) +
+  geom_line(aes(y=Actual, color='#00FF00'),size=0.3) +
+  geom_line(aes(y=Fitted, color='#FF0000'), linetype=2,size=0.3) +
+  theme_bw()+ ylab("Temperature") + xlab("") +
+  geom_vline(xintercept=as.numeric(as.Date("1990-12-31")), linetype=2,size=0.2) + 
+  geom_ribbon(aes(ymin=LL, ymax=UL), fill="grey", alpha=0.5) +
+  ggtitle(paste0("BSTS -- Holdout RMSE = ", round(RMSE_bs,2))) +
+  theme(axis.text.x=element_text(hjust = 0), legend.position = 'none',text=element_text(size=6))
+```
+
+
+```{r fig.margin = TRUE, fig.cap= '\\label{fig:fig6} Example of Trigonometric Seasonal component (1.11), (1.12)', fig.width=3, fig.height=2.5, echo=FALSE,message=FALSE, warning=FALSE}
+g1
+```
+
+```{marginfigure}
+[(источник данных)](https://datamarket.com/data/set/235d/mean-daily-temperature-fisher-river-near-dallas-jan-01-1988-to-dec-31-1991#!ds=235d&display=line)
+```
+
+```{marginfigure}
+На графиках \ref{fig:fig5} и \ref{fig:fig6} видны существенные отклонения прогнозов от истинных значений, широкие предиктивные интервалы. Из-за особенностей построения тригонометрического тренда (как суммы $\sin$ и $\cos$) для примера на графике \ref{fig:fig6} нужно увеличить период колебаний в 2 раза и использовать прогнозы, взятые по модулю. В данном примере использовать BSTS сложнее, чем Prophet (будет показано далее), необходимо дополнительно учитывать особенность формулы для моделирования сезонности временного ряда.
+```
+
+1) $\sigma^2_{\gamma_j}\sim IG(\alpha_{\gamma_j},\beta_{\gamma_j})$ и $\gamma^*_j|\sigma^2_{\gamma_j} \sim N(0, \sigma_{\gamma_j}^2)$. 
+
+2) Начальные значения вектора коэффициентов $\gamma^*_j$ (первые $[s/2]$ значений вектора $\gamma^*_j$) имеют многомерное нормальное распределение:
+
+$\gamma^*_0,\dots,\gamma^*_{[s/2]}\sim MN(\gamma, \Sigma_{\gamma})$.
+
+_Дефолтные значения аргументов функции AddTrig():_  
+
+```{r,  eval=FALSE}
+# if sdy is ignored
+sdy <- sd(y, na.rm = TRUE)
+# if sigma.prior = NULL
+sigma.prior <- SdPrior(.01 * sdy, upper.limit = sdy)
+# if initial.state.prior = NULL
+dimension <- 2 * length(frequencies)
+initial.state.prior <- MvnPrior(
+        mean = rep(0, dimension),
+        variance = diag(rep(sdy, dimension)^2))
+```
+
+## Авторегрессионная компонента
+
+Добавление авторегрессионной составляющей аналогично рассмотрению _AR(p)_-процесса:
+
+\[y_t = \sum_{i=1}^{p} \alpha_i y_{t-i} +\varepsilon_t,\;\; \varepsilon_t \sim WN(0, \sigma_{\varepsilon}^2)\] 
+
+в котором текущее значение временного ряда линейно зависит от $p$ предыдущих значений (лагов) этого ряда.
+
+_Априорное распределение в пакете BSTS:_
+
+Добавление авторегрессинной компоненты производится с помощью функции _AddAr()_, при этом предполагается, что
+
+```{marginfigure}
+Моделируемое количество лагов $p$ можно задать в аргументе _lags_.
+```
+
+1) $\sigma^2_{\varepsilon}\sim IG(\alpha_{\varepsilon},\beta_{\varepsilon})$ и $\varepsilon_t|\sigma^2_{\varepsilon}\sim N(0, \sigma_{\varepsilon}^2)$.
+
+```{marginfigure}
+Параметры $\alpha_{\varepsilon}$ и $\beta_{\varepsilon}$ можно задать в аргументе _sigma.prior_ (NULL по умолчанию).
+```
+
+```{marginfigure}
+Параметры $\mu$ (математическое ожидание) и $\Sigma$ (ковариационная матрица) можно задать внутри функции _AddAr()_ в аргументе _initial.state.prior_ (NULL по умолчанию), который является объектом класса _MvnPrior_: при инициализации _initial.state.prior_ $\mu$ задаётся через аргумент _mean_, $\Sigma$ задаётся через аргумент _variance_.
+
+Например, для _AR(2)_-процесса и 
+
+\[\mu= \left( \begin{array}{cc}
+1  \\
+2 
+\end{array} \right),\;
+%
+\Sigma=\left( \begin{array}{cc}
+1 & 1 \\
+1 & 9
+\end{array} \right)
+\]
+
+initial.state.prior = MvnPrior(mean=c(1,2), variance=matrix(c(1, 1, 1, 9), nrow=2, ncol=2)).
+```
+
+2) Вектор начальных значений временного ряда (первые $p$ значений вектора $y_t$) имеет многомерное нормальное распределение: $(y_0,\dots,y_{p-1})^T\sim MN(\mu, \Sigma)$. 
+
+_Дефолтные значения аргументов функции AddAr():_  
+
+```{r,  eval=FALSE}
+# if number of lags is ignored
+lags = 1
+# if sdy is ignored
+sdy <- sd(y, na.rm = TRUE)
+# sdy is standard deviation of the time series
+# if sigma.prior = NULL
+```
+
+\newpage
+```{marginfigure}
+\begin{lstlisting}[language=R]
+AddAr <- function(
+          state.specification,
+          y,
+          lags = 1,
+          sigma.prior = NULL,
+          initial.state.prior = NULL,
+          sdy)
+
+\end{lstlisting}
+```
+
+```{marginfigure}
+\begin{lstlisting}[language=R]
+residual.sd <- .001
+# Actual values of the AR coefficients
+true.phi <- c(-.7, .3, .15)
+ar <- arima.sim(model = list(ar = true.phi),
+                n = 100, sd = 3)
+# Layer some noise on top of the AR process.
+y <- ar + rnorm(n, 0, residual.sd)
+ss <- AddAr(list(), lags = 3, sigma.prior = SdPrior(3.0, 1.0))
+# Fit the model with knowledge with residual.sd 
+# essentially fixed at the true value.
+model <- bsts(y, state.specification=ss, niter = 500, 
+              prior = SdPrior(residual.sd, 100000))
+\end{lstlisting}
+```
+
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# example from BSTS documentation (L.Scott)
+n <- 100
+residual.sd <- .001
+# Actual values of the AR coefficients
+true.phi <- c(-.7, .3, .15)
+seed=2016
+ar <- arima.sim(model = list(ar = true.phi),
+                n = n,
+                sd = 3)
+## Layer some noise on top of the AR process.
+y <- ar + rnorm(n, 0, residual.sd)
+ss <- AddAr(list(), lags = 3, sigma.prior = SdPrior(3.0, 1.0))
+# Fit the model with knowledge with residual.sd 
+# essentially fixed at the true value.
+model <- bsts(y, state.specification=ss, niter = 500, prior = SdPrior(residual.sd, 100000),seed=2016)
+```
+
+```{r fig.margin = TRUE, fig.cap= '\\label{fig:fig7} Example of AR-component (L.Scott)', fig.width=6, fig.height=6, echo=FALSE,message=FALSE, warning=FALSE}
+# Now compare the empirical ACF to the true ACF.
+acf(y, lag.max = 30,cex.lab=0.7,cex.axis=0.6,main='')
+points(0:30, ARMAacf(ar = true.phi, lag.max = 30), pch = "+")
+points(0:30, ARMAacf(ar = colMeans(model$AR3.coefficients), lag.max = 30))
+legend("topright", leg = c("empirical", "truth", "MCMC"), pch = c(NA, "+", "o"),cex = 0.8)
+```
+
+```{r,  eval=FALSE}
+sigma.prior <- SdPrior(.01 * sdy)
+# if initial.state.prior = NULL
+# the stationary distribution of the AR(p) process
+# will be used as the initial state distribution.
+```
+
+## Праздники 
+
+Праздники также оказывают значительное влияние на динамику временных рядов (например, продажи, потребление, цены). Праздничные дни зачастую не являются строго периодичными, что создаёт проблему для их моделирования с помощью сезонной компоненты (например, День благодарения в США отмечается в четвертый четверг ноября, поэтому дата этого праздника не будет одинаковой для каждого года). Поскольку влияние конкретного праздника на динамику временных рядов часто бывает одинаковым из года в год, включение этой компоненты является важным для построения качественных прогнозов.
+ 
+Пакет BSTS также позволяет добавлять модель случайного блуждания для праздничных дней к структурной модели. Получившаяся модель предполагает, что каждый рабочий день между праздниками смещается в календаре относительно своей даты в прошлом году в соответствии со случайным блужданием.
+
+_Априорное распределение в пакете BSTS:_
+
+Добавление эффекта праздников может производиться разными функциями в зависимости от данных, например, с помощью функции  \foreignlanguage{english}{\textit{AddNamedHolidays()}}, при этом предполагается, что
+
+1) Стандартное отклонение приращений процесса случайного блуждания имеет обратное Гамма-распределение: $\sigma^2\sim IG(\alpha,\beta)$.
+```{marginfigure}
+Параметры $\alpha$ и $\beta$ можно задать в аргументе _sigma.prior_ (NULL по умолчанию).
+```
+
+
+2) Начальные значения компоненты праздников (количество которых равно указанному количеству праздников в году) имеют нормальное распределение.
+
+```{marginfigure}
+Параметры которого можно задать в аргументе _initial.state.prior_ (NULL по умолчанию).
+```
+
+```{marginfigure}
+\begin{lstlisting}[language=R]
+AddNamedHolidays <- function(
+          state.specification = NULL,
+          named.holidays = NamedHolidays(),
+          y, sigma.prior = NULL,
+          initial.state.prior = NULL,
+          sdy = sd(as.numeric(y), 
+          na.rm = TRUE),time0 = NULL,
+          days.before = 1,
+          days.after = 1)
+\end{lstlisting}
+```
+
+_Дефолтные значения аргументов функции AddNamedHolidays():_  
+
+```{r,  eval=FALSE}
+# NamedHolidays() returns a vector with full names of holidays
+# if list of named holidays is ignored
+named.holidays <- NamedHolidays()
+# if sdy is ignored
+sdy <- sd(y, na.rm = TRUE)
+# if sigma.prior = NULL
+sigma.prior <- SdPrior(.01 * sdy, upper.limit = sdy)
+# if initial.state.prior = NULL
+NormalPrior(0, sdy)
+# time0 can be ignored if y is a zoo or xts object
+# then time0 is time of the first observation
+time0 <- .SetTimeZero(time0, y)
+# days.before is the number of days the influence of the named
+# holidays extends prior to the actual holiday. If ignored
+days.before <- 1
+#  days.after is the number of days the influence of the named
+# holidays extends after the actual holiday. If ignored
+days.after <- 1
+```
+
+
+## Комбинации
+
+В зависимости от задачи в модель \eqref{eq1.1} можно включать любые комбинации описанных выше компонент, задавая спецификацию временного ряда. Например, объединив \eqref{eq1.3} и \eqref{eq1.8} (или \eqref{eq1.3} и \eqref{eq1.11}), получим модель *локального уровня и сезонности*:
+
+```{marginfigure}
+Для этого в спецификацию модели нужно последовательно добавить локальный уровень и сезонность:
+\begin{lstlisting}[language=R]
+data(AirPassengers)
+y <- log(AirPassengers)
+ss <- AddLocalLevel(list(), y) 
+ss <- AddSeasonal(ss, y, nseasons = 12)
+# Fitting the model
+model <- bsts(y, state.specification = ss, niter = 500)
+\end{lstlisting}
+```
+
+\begin{equation}\label{eq1.13} \tag{1.13}
+y_t = \mu_t + \gamma_t + \varepsilon_t,\;\;\varepsilon_t \sim WN(0, \sigma_{\varepsilon}^2),
+\end{equation}
+
+$\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;$ с $\mu_t$ из \eqref{eq1.3} и $\gamma_t$ из \eqref{eq1.8} или \eqref{eq1.11}
+
+Из этой модели легко получить *модель локального линейного тренда и сезонности*, взяв $\mu_t$ из \eqref{eq1.4}:
+
+```{marginfigure}
+Для этого в спецификацию модели нужно последовательно добавить локальный линейный тренд и сезонность:
+\begin{lstlisting}[language=R]
+data(AirPassengers)
+y <- log(AirPassengers)
+ss <- AddLocalLinearTrend(list(),y) 
+ss <- AddSeasonal(ss,y,nseasons = 12)
+# Fitting the model
+model <- bsts(y, state.specification = ss, niter = 500)
+\end{lstlisting}
+```
+
+\begin{equation}\label{eq1.14} \tag{1.14}
+y_t = \mu_t + \gamma_t + \varepsilon_t,\;\;\varepsilon_t \sim WN(0, \sigma_{\varepsilon}^2),
+\end{equation}
+
+$\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;$ с $\mu_t$ из \eqref{eq1.4} и $\gamma_t$ из \eqref{eq1.8} или \eqref{eq1.11}
+
+Если же взять $\mu_t$ из \eqref{eq1.6}, можно получить *модель полулокального линейного тренда и сезонности*:
+
+```{marginfigure}
+Для этого в спецификацию модели нужно последовательно добавить полулокальный линейный тренд и сезонность:
+\begin{lstlisting}[language=R]
+data(AirPassengers)
+y <- log(AirPassengers)
+ss <- AddSemilocalLinearTrend(list(),y) 
+ss <- AddSeasonal(ss, y, nseasons = 12)
+# Fitting the model
+model <- bsts(y, state.specification = ss, niter = 500)
+\end{lstlisting}
+```
+
+\begin{equation}\label{eq1.14} \tag{1.15}
+y_t = \mu_t + \gamma_t + \varepsilon_t,\;\;\varepsilon_t \sim WN(0, \sigma_{\varepsilon}^2),
+\end{equation}
+
+$\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;\;$ с $\mu_t$ из \eqref{eq1.6} и $\gamma_t$ из \eqref{eq1.8} или \eqref{eq1.11}
+
+Аналогично в \eqref{eq1.1} можно добавить авторегрессионную компоненту или эффект праздников в зависимости от предполагаемой структуры временного ряда (и получив, например, *модель локального линейного тренда, сезонности и праздников*).
+
+
+# Пакет Prophet и модели структурных временных рядов 
+
+Пакет Prophet^[Авторы: Sean Taylor, Ben Letham, Facebook] создан для работы с моделями байесовских структурных временных рядов.^[A. Harvey and S. Peters. *Estimation procedures for structural time series models.* Journal of Forecasting, 9:89–108, 1990.]. В своей модели авторы предполагают, что временной ряд представим в виде суммы трёх компонент: тренда, сезонности и праздников, динамика которых может меняться со временем. Данная спецификация временного ряда идейно очень схожа с пакетом BSTS в том плане, что: 1) исходный ряд представляется в виде суммы ненаблюдаемых объясняющих компонент и 2) можно задавать априорное распределение для используемых компонент и параметров. Однако существенной особенностью модели Prophet является довольно сложная компонента, отвечающая за тренд, которая (в отличие от локального и полулокального тренда в BSTS) позволяет задавать количество и моменты изменений тренда, а также допускает возможность скачков.
+
+Базовая модель структурных временных рядов имеет вид: ^[Sean J. Taylor and Benjamin Letham. *Forecasting at Scale*. Facebook research blog, 2017.]
+
+\begin{equation}\label{eq2.1} \tag{2.1}
+y(t)=g(t)+s(t)+h(t)+\varepsilon_t,
+\end{equation}
+
+где $g(t)$ является функцией тренда, которая моделирует непериодические изменения в значениях временного ряда, $s(t)$ отражает сезонные изменения, $h(t)$ моделирует эффекты праздников (которые могут происходить нерегулярно и длиться более одного дня), $\varepsilon_t$ является случайной ошибкой и имеет нормальное распределение.
+
+Модель \eqref{eq2.1} схожа с обобщёнными аддитивными моделями (GAM)^[Hastie, T. J.; Tibshirani, R. J. (1990). Generalized Additive Models. Chapman & Hall/CRC.] в том смысле, что представляет собой регрессию, в которой к объясняющим переменным могут быть применены нелинейные сглаживающие функции. В модели \eqref{eq2.1} используется время в качестве единственного регрессора, к которому может быть применено сразу несколько нелинейных функций. В итоге, по аналогии с \eqref{eq1.1}, временной ряд раскладывается на сумму нескольких компонент, которые могут быть явно извлечены и проанализированы, однако задача прогнозирования сводится к нахождению наиболее похожей на $y(t)$ кривой, зависящей от $t$. 
+
+Стоит отметить, что теоретическая модель для пакета Prophet изначально была разработана для прогнозирования различных показателей социальной сети Facebook (например, числа пользователей), что отражается в специфичном моделировании отдельных компонент \eqref{eq2.1}. Однако получившаяся модель показывает хорошие результаты в работе с другими показателями делового сектора и может быть использована для решения более общих задач прогнозирования.
+
+## Тренд
+
+Для построения тренда (в первоначальной задаче - роста числа пользователей Facebook) используется модель, схожая моделью роста населения, где происходит нелинейный рост, ограниченный сверху естественными условиями (например, число пользователей Facebook ограничено числом людей, имеющим доступ к Интернету). Тренд в \eqref{eq2.1} задаётся формулой:
+
+\begin{equation}\label{eq2.2} \tag{2.2}
+g(t)= \dfrac{C(t)}{1+e^{-k(t-b)},}
+\end{equation}
+
+где $C(t)$ --- ограничение сверху, $k$ --- темп роста, $b$ --- параметр смещения.
+
+$C(t)$ в формуле \eqref{eq2.2} --- естественное ограничение среды, меняющееся со временем, которое также является максимально возможным значением функции $g(t)$. Наиболее простыми видами $C(t)$ являются постоянное ограничение ($C(t)=K$) и линейное ограничение ($C(t)=Mt+K$), хотя спецификация зависит от конкретной задачи и знаний области.
+
+Необходимо также учесть, что темп роста $k$ может меняться со временем --- для этого в модель явным образом введём $S$ моментов времени $s_j,\;\; j=1,\dots,S$, в которых $k$ позволено меняться (заметим, что при введении дискретного числа точек, в которых может изменяться параметр $k$, мы получим кусочно-заданную функцию тренда). Определим вектор $\delta \in R^S,$ где $\delta_j$ --- это изменение темпа роста, произошедшее в момент времени $s_j$. Тогда темп роста в любой момент времени $t$ можно определить как сумму $k + \sum_{j:t\geq s_j} \delta_j$ или $k + a(t)^{T}\delta$, где $a(t)\in \{0,1\}^S$ и 
+\begin{equation*}
+a_{j}(t) = 
+ \begin{cases}
+   1, &\text{ $t \geq s_j$}\\
+   0, &\text{ $t < s_j$}
+ \end{cases}
+\end{equation*}
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+
+data <- read.csv("volume-of-money-abs-definition-m_bsts.csv", sep = ",", dec = ',', header = TRUE,
+                 stringsAsFactors = FALSE)
+data$Month <- as.Date(data$Month,format = "%Y-%m-%d")
+
+training_cut_date <- as.Date(as.character("1993-12-01"),format = "%Y-%m-%d")
+
+data_train <- data[data$Month <= training_cut_date,]
+yts <- xts(data_train$Vol_money, order.by=data_train$Month)
+##### Prophet
+cap <- rep(max(yts),length(yts)) # capacities as maximum value of series
+yts_df <- data.frame(ds = index(yts), y = yts, cap = cap, row.names=NULL)
+# delta ~ DE(0,5)
+m <- prophet(yts_df, growth='logistic',changepoint.prior.scale=5, yearly.seasonality=FALSE, weekly.seasonality=FALSE)
+
+yts_fut <- xts(data$Vol_money, order.by=data$Month)
+cap_fut <- rep(max(yts),length(yts_fut))
+future <- data.frame(ds = index(yts_fut), y = yts_fut, cap = cap_fut, row.names=NULL)
+
+forecast <- predict(m, future)
+### RMSE
+RMSE_pr <- (mean((tail(data$Vol_money,12)-tail(forecast$yhat,12))^2))^(1/2)
+
+### plot results
+update_geom_defaults('point', list(size=0.02))
+g1 <- plot(m, forecast, xlabel = "", ylabel = "Volume")+
+  ggtitle(paste0("Prophet -- Holdout RMSE = ", round(RMSE_pr,2)))+
+  geom_vline(xintercept=as.numeric(as.Date("1993-12-01")), linetype=2,size=0.2)+
+  theme_bw()+theme(text=element_text(size=6))
+
+# delta ~ DE(0,0.02)
+m <- prophet(yts_df, growth='logistic',changepoint.prior.scale=0.02, yearly.seasonality=FALSE, weekly.seasonality=FALSE)
+
+yts_fut <- xts(data$Vol_money, order.by=data$Month)
+cap_fut <- rep(max(yts),length(yts_fut))
+future <- data.frame(ds = index(yts_fut), y = yts_fut, cap = cap_fut, row.names=NULL)
+
+forecast <- predict(m, future)
+### RMSE
+RMSE_pr <- (mean((tail(data$Vol_money,12)-tail(forecast$yhat,12))^2))^(1/2)
+### plot results
+update_geom_defaults('point', list(size=0.02))
+g2 <- plot(m, forecast, xlabel = "", ylabel = "Volume")+
+  ggtitle(paste0("Prophet -- Holdout RMSE = ", round(RMSE_pr,2)))+
+  geom_vline(xintercept=as.numeric(as.Date("1993-12-01")), linetype=2,size=0.2)+
+  theme_bw()+theme(text=element_text(size=6))
+```
+
+```{r fig.margin=TRUE, fig.show='hold', fig.width=3, fig.height=2.5,fig.cap= '\\label{fig:fig1} Trend (2.3) with $C(t)=K,\\; \\delta \\sim DExp(0,5)$ and $\\delta \\sim DExp(0,0.02)$.', echo=FALSE}
+g1
+g2
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+##### linear growth of capacity
+cap <- c(min(yts))
+for(i in 2:length(yts)){
+  cap[i] <- min(yts)+610*(i-1)
+}
+yts_df <- data.frame(ds = index(yts), y = yts, cap = cap, row.names=NULL)
+# delta ~ DE(0,5)
+m <- prophet(yts_df, growth='logistic',changepoint.prior.scale=5, yearly.seasonality=FALSE, weekly.seasonality=FALSE)
+
+yts_fut <- xts(data$Vol_money, order.by=data$Month)
+cap_fut <- c(tail(cap,1))
+for(i in 2:length(yts_fut)){
+  cap[i] <- tail(cap,1)+610*(i-1)
+}
+
+future <- data.frame(ds = index(yts_fut), y = yts_fut, cap = cap_fut, row.names=NULL)
+forecast <- predict(m, future)
+### RMSE
+RMSE_pr <- (mean((tail(data$Vol_money,12)-tail(forecast$yhat,12))^2))^(1/2)
+
+### plot results
+update_geom_defaults('point', list(size=0.02))
+g1 <- plot(m, forecast, xlabel = "", ylabel = "Volume")+
+  ggtitle(paste0("Prophet -- Holdout RMSE = ", round(RMSE_pr,2)))+
+  geom_vline(xintercept=as.numeric(as.Date("1993-12-01")), linetype=2,size=0.2)+
+  theme_bw()+theme(text=element_text(size=6))
+
+# delta ~ DE(0,0.02)
+m <- prophet(yts_df, growth='logistic',changepoint.prior.scale=0.02, yearly.seasonality=FALSE, weekly.seasonality=FALSE)
+
+yts_fut <- xts(data$Vol_money, order.by=data$Month)
+cap_fut <- rep(max(yts),length(yts_fut))
+future <- data.frame(ds = index(yts_fut), y = yts_fut, cap = cap_fut, row.names=NULL)
+
+forecast <- predict(m, future)
+### RMSE
+RMSE_pr <- (mean((tail(data$Vol_money,12)-tail(forecast$yhat,12))^2))^(1/2)
+
+### plot results
+update_geom_defaults('point', list(size=0.02))
+g2 <- plot(m, forecast, xlabel = "", ylabel = "Volume")+
+  ggtitle(paste0("Prophet -- Holdout RMSE = ", round(RMSE_pr,2)))+
+  geom_vline(xintercept=as.numeric(as.Date("1993-12-01")), linetype=2,size=0.2)+
+  theme_bw()+theme(text=element_text(size=6))
+```
+
+```{r fig.margin=TRUE, fig.show='hold', fig.width=3, fig.height=2.5,fig.cap= '\\label{fig:fig2} Trend (2.3) with $C(t)=Mt+K,\\; \\delta \\sim DExp(0,5)$ and $\\delta \\sim DExp(0,0.02)$.', echo=FALSE}
+g1
+g2
+```
+
+```{marginfigure}
+[(источник данных)](https://datamarket.com/data/set/22s7/volume-of-money-abs-definition-m1-feb-1960-dec-1994#!ds=22s7&display=line)
+```
+
+При изменении темпа роста $k$ необходимо также пересчитывать значение $b$ для предотвращения разрывов в функции тренда. Величина корректировки в момент времени $s_j$ рассчитывается по формуле:
+
+\[\gamma_j=\left( s_j -b-\sum_{l<j}\gamma_l\right)\left(1-\frac{k+\sum_{l<j}\delta_l}{k+\sum_{l\le j}\delta_l}\right) \]
+
+Таким образом, нелинейная кусочно-заданная функция тренда имеет вид:
+
+\begin{equation}\label{eq2.3} \tag{2.3}
+g(t)= \dfrac{C(t)}{1+e^{-(k + a(t)^{T}\delta)(t-(b + a(t)^{T}\gamma))}}
+\end{equation}
+
+На графиках \ref{fig:fig1} и \ref{fig:fig2} видно, что в зависимости от спецификации $C(t)$ и распределения $\delta$ меняются поведение тренда \eqref{eq2.3} и ширина предиктивных интервалов.
+
+Часто в целях создания более экономной модели можно использовать кусочно-постоянную функцию для изменения темпа роста $k$. В этом случае тренд будет иметь вид: 
+
+\begin{equation}\label{eq2.4} \tag{2.4}
+g(t)= (k + a(t)^{T}\delta)t + (b + a(t)^{T}\gamma),
+\end{equation}
+
+где как и раньше $k$ означает темп роста, $\delta$ --- изменение темпа роста, $b$ --- параметр смещения, $\gamma$ необходимо для непрерывности функции тренда.
+
+
+## Сезонность 
+
+Для аппроксимации сезонной компоненты как набора периодических функций от времени $t$ авторы предлагают использовать ряды Фурье: пусть $P$ --- это ожидаемый период временного ряда (например, $P=7$ для еженедельных данных, $P=30$ для ежемесячных данных), $2N$ --- количество используемых членов ряда Фурье (выбор большего $N$ позволит приблизить более сложные периодические функции, однако может привести к переобучению). Тогда аппроксимация сезонности будет выглядеть следующим образом:
+
+\begin{equation}\label{eq2.5} \tag{2.5}
+s(t)= \sum_{n=-N}^{N}c_{n}e^{i\frac{2\pi nt}{P}} 
+\end{equation}
+
+На основе \eqref{eq2.1} можно построить вектор сезонов для каждого значения $t$, например, для недельной сезонности ($P=7$) и $N=3$ получим
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# mean temperature
+temp <- read.csv("mean-daily-temperature-fisher-ri.csv", sep = ",", dec = '.', header = TRUE,
+                 stringsAsFactors = FALSE)
+
+temp$Date <- as.Date(temp$Date,format = "%Y-%m-%d")
+# make train data
+training_cut_date <- as.Date(as.character("1990-12-31"),format = "%Y-%m-%d")
+data_train <- temp[temp$Date <= training_cut_date,]
+yts <- xts(data_train$temp, order.by=data_train$Date)
+yts_df <- data.frame(ds = index(yts), y = yts, row.names=NULL)
+# fit Prophet with seasonal only
+m <- prophet(yts_df, yearly.seasonality=TRUE)
+
+yts_fut <- xts(temp$temp, order.by=temp$Date)
+future <- data.frame(ds = index(yts_fut), y = yts_fut, row.names=NULL)
+# Prophet predictions
+forecast <- predict(m, future)
+# RMSE 
+RMSE_pr <- (mean((tail(temp$temp,365)-tail(forecast$yhat,365))^2))^(1/2)
+#pr_rmse_d <- c(pr_rmse_d, RMSE_pr)
+# plot results
+update_geom_defaults('point', list(size=0.1))
+g2 <- plot(m, forecast,xlabel = "", ylabel = "Temperature",size=0.2) +  
+  ggtitle(paste0("Prophet -- Holdout RMSE = ", round(RMSE_pr,2)))+
+  geom_vline(xintercept=as.numeric(as.Date("1990-12-31")), linetype=2,size=0.2)+
+  theme_bw()+theme(text=element_text(size=6))
+```
+
+```{r fig.margin = TRUE, fig.cap= '\\label{fig:fig3} Seasonality (2.6) with $N=10$ and $P=365.25$, $\\beta \\sim N(0,10^2)$', fig.width=3, fig.height=2.5, echo=FALSE,message=FALSE, warning=FALSE}
+g2
+```
+
+```{marginfigure}
+[(источник данных)](https://datamarket.com/data/set/235d/mean-daily-temperature-fisher-river-near-dallas-jan-01-1988-to-dec-31-1991#!ds=235d&display=line)
+```
+
+\[ X(t)=\left( e^{i\frac{2\pi (-3)t}{7}}, \dots, e^{i\frac{2\pi (3)t}{7}}\right) \]
+
+Для добавления сезонной компоненты в модель \eqref{eq2.1} также потребуется оценить параметры 
+$c_{n},\; n=-N,\dots,N$, которые можно объединить в один вектор $\beta$. Тогда выражение \eqref{eq2.5} можно переписать в виде произведения вектора сезонов на вектор неизвестных параметров:
+
+\begin{equation}\label{eq2.6} \tag{2.6}
+s(t)= X(t)\beta,
+\end{equation}
+
+задав при этом априорное распределение вектора $\beta$ (например, $\beta \sim N(0, \sigma^2)$).
+
+На графике \ref{fig:fig3} изображены результаты применения \eqref{eq2.6} на данных с выраженной годовой сезонностью ($P=365.25$ из-за годовой периодичности данных, $2N=20$ --- количество используемых членов ряда Фурье для аппроксимации, $\beta \sim N(0,10^2)$ --- априорное распределение параметров $c_n$).
+
+## Праздники
+
+Пакет Prophet также даёт возможность добавлять эффект праздников во временной ряд, позволяя исследователю включать конкретные прошлые или будущие события в анализ. Важно учитывать не только международные праздники (например, Рождество), но и характерные для рассматриваемой страны события (например, День благодарения в США).
+
+Эффекты праздников предполагаются независимыми, что позволяет легко включить их рассмотрение в модель \eqref{eq2.1}. Для каждого праздника $i, \; i=1,\dots,L$ определим $D_i$ как множество прошлых и будущих календарных дат этого праздника. Тогда можно задать функцию индикатора $I(t\in D_i)$, показывающую, попал ли момент времени $t$ на праздник $i$, и присвоить каждому празднику $i$ оказываемый эффект на прогноз $k_i$. Получим суммарный эффект праздников на момент $t$:
+
+\begin{equation}\label{eq2.7} \tag{2.7}
+h(t)= \sum_{i=1}^{L} k_{i}I(t\in D_i)
+\end{equation}
+
+Выражение \eqref{eq2.7} можно обобщить, добавив в него эффект от нескольких дней вблизи конкретного праздника (это связано с тем, что люди ведут себя по-разному до наступления праздника и после его окончания). Для того чтобы учесть этот факт, в уравнение \eqref{eq2.7} могут быть добавлены дополнительные эффекты (подобно $k_i$) для дней, окружающих праздник (например, три дня до $D_i$ и два дня после $D_i$ для праздника $i$).
+
+Подобно сезонности, выражение \eqref{eq2.7} можно переписать в матричном виде:
+
+\begin{equation}\label{eq2.8} \tag{2.8}
+h(t)= Z(t)k,
+\end{equation}
+
+где $Z(t)$ --- вектор индикаторов праздника для каждого значения $t$: 
+\[Z(t)= \left( I(t\in D_1), \dots, I(t\in D_L)\right),\]
+
+$k=(k_1,\dots,k_L)^T$ --- вектор оказываемых эффектов, для которого можно задать априорное распределение(например, $k \sim N(0, \nu^2)$).
+
+# Реализация в пакете Prophet
+
+```{marginfigure}
+Функция _prophet()_ со значением аргументов по умолчанию:
+\begin{lstlisting}[language=R]
+prophet(df = df, growth = "linear", 
+changepoints = NULL, n.changepoints = 25, 
+yearly.seasonality = "auto",
+weekly.seasonality = "auto", 
+holidays = NULL,
+seasonality.prior.scale = 10, 
+holidays.prior.scale = 10,
+changepoint.prior.scale = 0.05, 
+mcmc.samples = 0, interval.width = 0.8,
+uncertainty.samples = 1000, fit = TRUE, ...)
+\end{lstlisting}
+```
+
+Пакет Prophet реализован на двух языках программирования: R и Python. Для обучения моделей и построения прогнозов Prophet использует библиотеку Stan языка программирования C++, которая автоматически вызывается при наборе команд из пакета Prophet. Как и в BSTS, пользователю достаточно работать с готовыми функциями пакета, подавая в качестве аргументов данные и необходимые параметры теоретических моделей. Отличием от BSTS является то, что для задания всех компонент временного ряда используется одна функция _prophet()_, в аргументах которой можно указать вид компоненты и необходимые для её спецификации параметры. 
+
+Так, аргументы функции _prophet()_ для моделирования тренда имеют вид:
+
+```{marginfigure}
+Входные данные модели линейного тренда в Stan:
+\begin{lstlisting}[language=R]
+data {
+  int T;               # Sample size
+  int<lower=1> K;      # Number of seasonal 
+                       # vectors
+  vector[T] t;         # Day
+  vector[T] y;         # Time-series
+  int S;               # Number of changepoints
+  matrix[T, S] A;      # Split indicators
+  real t_change[S];    # Index of changepoints
+  matrix[T,K] X;       # season vectors
+  real<lower=0> sigma; # scale on seasonality 
+                       # prior
+  real<lower=0> tau;   # scale on changepoints 
+}                      # prior
+\end{lstlisting}
+```
+
+```{marginfigure}
+Входные данные модели нелинейного тренда в Stan:
+\begin{lstlisting}[language=R]
+data {
+  int T;               # Sample size
+  int<lower=1> K;      # Number of seasonal
+                       # vectors
+  vector[T] t;         # Day
+  vector[T] cap;       # Capacities
+  vector[T] y;         # Time-series
+  int S;               # Number of changepoints
+  matrix[T, S] A;      # Split indicators
+  real t_change[S];    # Index of changepoints
+  matrix[T,K] X;       # season vectors
+  real<lower=0> sigma; # scale on seasonality 
+                       # prior
+  real<lower=0> tau;   # scale on changepoints 
+}                      # prior
+\end{lstlisting}
+```
+
+```{marginfigure}
+Априорные распределения параметров в Stan:
+\begin{lstlisting}[language=R]
+model {
+  # priors
+  k ~ normal(0, 5);
+  m ~ normal(0, 5);
+  delta ~ double_exponential(0, tau);
+  sigma_obs ~ normal(0, 0.5);
+  beta ~ normal(0, sigma);
+
+  # Non-linear Likelihood
+  y ~ normal(cap ./ (1 + exp(-(k + A * delta) .* (t - (m + A * gamma)))) + X * beta, sigma_obs)
+  
+  # Linear Likelihood
+  y ~ normal((k + A * delta) .* t + (m + A * gamma) + X * beta, sigma_obs)
+}
+\end{lstlisting}
+```
+
+1) _df_ --- исследуемый временной ряд, который обязан содержать наблюдения _y_ и время наблюдения _ds_. Если функция тренда нелинейная, то _df_ должен содержать ограничения сверху _cap_ ($C(t)$ в модели) в каждый момент времени _ds_. В Stan из аргумента _df_ подаётся количество наблюдений _int T_, время наблюдений _vector[T] t_, ограничения сверху _vector[T] cap_, временной ряд _vector[T] y_. 
+
+2) _growth_ --- функция тренда, может принимать два значения: _"linear"_ (по умолчанию) задаёт линейную функцию тренда вида \eqref{eq2.4}, _"logistic"_ задаёт нелинейную (логистическую) функцию тренда вида \eqref{eq2.3}. Указание значения аргумента _growth_ отобразится на выборе одной из двух моделей тренда в Stan, в которую затем будут подаваться параметры для тренда, сезонности и праздников. 
+
+3) _changepoints_ --- вектор из моментов времени $s_j,\; j=1,\dots , S$, в которых может изменяться темп роста тренда. По умолчанию  _changepoints_ = NULL и вектор подбирается автоматически. В Stan данная переменная подаётся как _real t\_change[S]_. 
+
+4) _n.changepoints_ --- количество моментов времени $S$, в которых может изменяться темп роста тренда. Если указан аргумент _changepoints_, то \textit{n.} \foreignlanguage{english}{\textit{changepoints}} автоматически определяется как длина указанного вектора. Если аргумент _changepoints_ не указан, то _n.changepoints_ подбирается автоматически из первых 80% наблюдений _df_. По умолчанию _n.changepoints_ = 25. В Stan данная переменная подаётся как _int S_.
+
+5) _changepoint.prior.scale_ --- числовой параметр ($\tau$), контролирующий автоматический подбор _changepoints_: чем больше значение параметра, тем больше гибкости в подборе роста тренда в _changepoints_. В Stan данная переменная подаётся как _real\<lower=0\> tau_, от которой зависит распределение вектора $\delta$ (вектор изменений темпа роста тренда): $\delta \sim DExp(0, tau)$, где _DExp(0, tau)_ --- двойное экспоненциальное распределение (распределение Лапласа). По умолчанию _changepoint.prior.scale_ = 0.05.
+
+Аргументы функции _prophet()_ для моделирования сезонности имеют вид:
+
+6) _yearly.seasonality_ --- аргумент, с помощью которого задаётся наличие годовой сезонности временного ряда. Принимает три возможных значения: TRUE --- сезонность есть, FALSE --- сезонности нет или 'auto' --- функция сама определяет наличие сезонности (при количестве наблюдений не меньше 730 функция будет строить сезонность). Параметры $2N$ (количество членов ряда Фурье) и $P$ (период) задаются авторами библиотеки константами: $N = 10,\; P=365.25$ соответственно. По умолчанию  _yearly.seasonality_ = 'auto'.
+
+```{marginfigure}
+Константы $N$ и $P$ определены в функции _make_all_seasonality_features()_. 
+```
+
+7) _weekly.seasonality_ --- аргумент, с помощью которого задаётся наличие недельной сезонности временного ряда. Принимает три возможных значения: TRUE --- сезонность есть, FALSE --- сезонности нет или 'auto' --- функция сама определяет наличие сезонности (при количестве наблюдений не меньше 14 функция будет строить сезонность). Параметры $2N$ (количество членов ряда Фурье) и $P$ (период) задаются авторами библиотеки константами: $N = 3,\; P=7$ соответственно. По умолчанию _weekly.seasonality_ = 'auto'.
+
+```{marginfigure}
+Константы $N$ и $P$ определены в функции _make_all_seasonality_features()_. 
+```
+
+8) _seasonality.prior.scale_ --- аргумент, с помощью которого задаётся априорное значение стандартного отклонения $\sigma$ вектора $\beta$ ($\beta\sim N(0,\sigma^2)$). В Stan данная переменная подаётся как _real\<lower=0\> sigma_ и используется в априорном распределении _beta \~ normal(0, sigma)_. По умолчанию _seasonality.prior.scale_ = 10.
+
+
+Аргументы функции _prophet()_ для моделирования праздников имеют вид:
+
+9) _holidays_ --- аргумент, с помощью которого задаётся праздничная компонента временного ряда. Представляет собой таблицу, столбцы которой содержат названия праздников и их даты, а также дополнительно могут содержать количество дней до ( _lower\_window_) и после ( _upper\_window_) указанной даты, которые должны быть включены в праздник (например, _lower\_window_ = -2 включит 2 дня в праздник до указанной даты праздника). По умолчанию _holidays_ = NULL, функция _make\_all\_seasonality\_features_ сама подбирает праздники под указанные даты временного ряда. 
+
+10) _holidays.prior.scale_ --- аргумент, с помощью которого задаётся априорное значение стандартного отклонения $\nu$ вектора эффектов праздников $k$ ($k\sim N(0,\nu^2)$). В модель Stan данный аргумент напрямую не подаётся, а используется в функции _make_holiday_features()_ при определении соотношения между стандартными отклонениями сезонной и праздничной компонент _scale.ratio_: чем меньше это соотношение, тем ближе к нулю будут эффекты праздников в сравнении с сезонными эффектами. По умолчанию _holidays.prior.scale_ = 10.
+
+```{marginfigure}
+$scale.ratio = \frac{holidays.prior.scale}{seasonality.prior.scale}$ 
+```
+
+# Результаты 
+
+## Локальный уровень
+Рассмотрим пример работы BSTS на примерах сгенерированных данных случайного блуждания. Изобразим временные ряды:
+
+```{r, message=FALSE, warning=FALSE,include=FALSE}
+# packages
+library(lubridate)
+library(dplyr)
+library(zoo)  
+library(xts)  
+library(broom)  
+library(ggplot2)
+library('gridExtra')
+library("cowplot")
+library(datasets)
+library(reshape2)
+library(bsts)
+library(prophet)
+Sys.setlocale("LC_TIME", "C")
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+rain<- read.csv("dates.csv", sep = ",", dec = '.', header = TRUE,
+                 stringsAsFactors = FALSE)
+rain$Year <- as.Date(rain$Year,format = "%Y-%m-%d")
+set.seed(2016)
+rain$rand1 <- arima.sim(list(order = c(0,1,0)), n = length(rain$Year)-1)
+rain$rand2 <- arima.sim(list(order = c(0,1,0)), n = length(rain$Year)-1)
+rain$rand3 <- arima.sim(list(order = c(0,1,0)), n = length(rain$Year)-1)
+```
+
+```{r fig.height = 1.5,fig.fullwidth = TRUE, fig.show='hold', message=FALSE, warning=FALSE,echo=FALSE}
+theme_set(theme_gray(base_size = 2))
+g1 <- ggplot(data=rain, aes(x=Year)) + 
+  geom_line(aes(y=rand1, colour = "#FF0000"),size=0.2)+
+  ylab("Random walk 1") + xlab("")+
+  theme(axis.text.x=element_text(hjust = 0), legend.position = 'none',
+        text=element_text(size=3))
+
+g2 <- ggplot(data=rain, aes(x=Year)) + 
+  geom_line(aes(y=rand2, colour = "#FF0000"),size=0.2)+
+  ylab("Random walk 2") + xlab("")+
+  theme(axis.text.x=element_text(hjust = 0), legend.position = 'none',
+        text=element_text(size=3))
+
+g3 <- ggplot(data=rain, aes(x=Year)) + 
+  geom_line(aes(y=rand3,colour = "#FF0000"),size=0.2)+
+  ylab("Random walk 3") + xlab("")+
+  theme(axis.text.x=element_text(hjust = 0), legend.position = 'none',
+        text=element_text(size=3)) 
+
+grid.arrange(g1,g2,g3, ncol=3)
+
+```
+
+Обучим модель BSTS и сделаем прогнозы на 1, 2 и 3 шага вперёд. Для этого зададим спецификацию модели как локальный уровень:
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+training_cut_date <- as.Date(as.character("1921-01-01"),format = "%Y-%m-%d")
+data_train <- rain[rain$Year <= training_cut_date,]
+yts <- xts(data_train$rand1, order.by=data_train$Year)
+```
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+# fit BSTS with local level
+ss <- AddLocalLevel(list(), yts)
+```
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+model <- bsts(yts, state.specification = ss, niter = 500, seed=2016)
+burn <- SuggestBurn(0.1, model)
+# BSTS predictions
+pred <- predict(model, horizon = 1, burn = burn, quantiles = c(.025, .975))
+# actual versus fitted data
+d2 <- data.frame(c(-colMeans(model$one.step.prediction.errors[-(1:burn),])+coredata(yts),pred$mean),
+                 as.numeric(rain$rand1), as.Date(rain$Year))
+names(d2) <- c("Fitted", "Actual", "Date")
+# RMSE 
+RMSE_bs <- filter(d2, year(Date)>1921) %>% summarise(RMSE=(mean((Actual-Fitted)^2))^(1/2))
+
+# make posterior intervals
+posterior.interval <- cbind.data.frame(
+  pred$interval[1,],pred$interval[2,],subset(d2,year(Date)>1921)$Date)
+names(posterior.interval) <- c("LL", "UL", "Date")
+
+# join intervals to the forecast
+d3 <- left_join(d2, posterior.interval, by="Date")
+
+# Plot actual versus predicted with credible intervals for the holdout period
+
+g1 <- ggplot(data=d3, aes(x=Date)) +
+  geom_line(aes(y=Actual, color='#00FF00'),size=0.2) +
+  geom_line(aes(y=Fitted, color='#FF0000'), linetype=2,size=0.2) +
+  theme_bw()+ ylab("Random walk 1") + xlab("") +
+  geom_vline(xintercept=as.numeric(as.Date("1921-01-01")), linetype=2,size=0.2) + 
+  geom_ribbon(aes(ymin=LL, ymax=UL), fill="grey", alpha=0.5) +
+  ggtitle(paste0("BSTS -- Holdout RMSE = ", round(RMSE_bs,2))) +
+  theme(axis.text.x=element_text(hjust = 0), legend.position = 'none',text=element_text(size=3))
+```
+```{r, message=FALSE, warning=FALSE,include=FALSE}
+training_cut_date <- as.Date(as.character("1920-01-01"),format = "%Y-%m-%d")
+data_train <- rain[rain$Year <= training_cut_date,]
+yts <- xts(data_train$rand2, order.by=data_train$Year)
+# fit BSTS with local level
+ss <- AddLocalLevel(list(), yts)
+
+model <- bsts(yts, state.specification = ss, niter = 500, seed=2016)
+burn <- SuggestBurn(0.1, model)
+# BSTS predictions
+pred <- predict(model, horizon = 2, burn = burn, quantiles = c(.025, .975))
+# actual versus fitted data
+d2 <- data.frame(c(-colMeans(model$one.step.prediction.errors[-(1:burn),])+coredata(yts),pred$mean),
+                 as.numeric(rain$rand2), as.Date(rain$Year))
+names(d2) <- c("Fitted", "Actual", "Date")
+# RMSE
+RMSE_bs <- filter(d2, year(Date)>1920) %>% summarise(RMSE=(mean((Actual-Fitted)^2))^(1/2))
+
+# make posterior intervals
+posterior.interval <- cbind.data.frame(
+  pred$interval[1,],pred$interval[2,],subset(d2,year(Date)>1920)$Date)
+names(posterior.interval) <- c("LL", "UL", "Date")
+
+# join intervals to the forecast
+d3 <- left_join(d2, posterior.interval, by="Date")
+
+# Plot actual versus predicted with credible intervals for the holdout period
+
+g2 <- ggplot(data=d3, aes(x=Date)) +
+  geom_line(aes(y=Actual, color='#00FF00'),size=0.2) +
+  geom_line(aes(y=Fitted, color='#FF0000'), linetype=2,size=0.2) +
+  theme_bw()+ ylab("Random walk 2") + xlab("") +
+  geom_vline(xintercept=as.numeric(as.Date("1920-01-01")), linetype=2,size=0.2) + 
+  geom_ribbon(aes(ymin=LL, ymax=UL), fill="grey", alpha=0.5) +
+  ggtitle(paste0("BSTS -- Holdout RMSE = ", round(RMSE_bs,2))) +
+  theme(axis.text.x=element_text(hjust = 0), legend.position = 'none',text=element_text(size=3))
+```
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+training_cut_date <- as.Date(as.character("1919-01-01"),format = "%Y-%m-%d")
+data_train <- rain[rain$Year <= training_cut_date,]
+yts <- xts(data_train$rand3, order.by=data_train$Year)
+# fit BSTS with local level
+ss <- AddLocalLevel(list(), yts)
+
+
+model <- bsts(yts, state.specification = ss, niter = 500, seed=2016)
+burn <- SuggestBurn(0.1, model)
+# BSTS predictions
+pred <- predict(model, horizon = 3, burn = burn, quantiles = c(.025, .975))
+# actual versus fitted data
+d2 <- data.frame(c(-colMeans(model$one.step.prediction.errors[-(1:burn),])+coredata(yts),pred$mean),
+                 as.numeric(rain$rand3), as.Date(rain$Year))
+names(d2) <- c("Fitted", "Actual", "Date")
+# RMSE 
+RMSE_bs <- filter(d2, year(Date)>1919) %>% summarise(RMSE=(mean((Actual-Fitted)^2))^(1/2))
+
+# make posterior intervals
+posterior.interval <- cbind.data.frame(
+  pred$interval[1,],pred$interval[2,],subset(d2,year(Date)>1919)$Date)
+names(posterior.interval) <- c("LL", "UL", "Date")
+
+# join intervals to the forecast
+d3 <- left_join(d2, posterior.interval, by="Date")
+
+# Plot actual versus predicted with credible intervals for the holdout period
+
+g3 <- ggplot(data=d3, aes(x=Date)) +
+  geom_line(aes(y=Actual, color='#00FF00'),size=0.2) +
+  geom_line(aes(y=Fitted, color='#FF0000'), linetype=2,size=0.2) +
+  theme_bw()+ ylab("Random walk 3") + xlab("") +
+  geom_vline(xintercept=as.numeric(as.Date("1919-01-01")), linetype=2,size=0.2) + 
+  geom_ribbon(aes(ymin=LL, ymax=UL), fill="grey", alpha=0.5) +
+  ggtitle(paste0("BSTS -- Holdout RMSE = ", round(RMSE_bs,2))) +
+  theme(axis.text.x=element_text(hjust = 0), legend.position = 'none',text=element_text(size=3))
+```
+```{r fig.height = 1.5,fig.fullwidth = TRUE, fig.show='hold', echo=FALSE}
+grid.arrange(g1,g2,g3, ncol=3)
+```
+
+Изобразим прогнозные значения: из графиков и значений _RMSE_ видно, что с увеличением горизонта прогнозирования ошибка стремительно растёт. Это связано с непредсказуемостью поведения случайного блуждания, что отражается в широких предиктивных интервалах, изображённых на графиках.  
+
+\newpage
+## Локальный линейный тренд
+Рассмотрим пример работы BSTS и Prophet на месячных данных объема денежной массы в Австралии с февраля 1960 по декабрь 1994 года^[[источник данных](https://datamarket.com/data/set/22s7/volume-of-money-abs-definition-m1-feb-1960-dec-1994#!ds=22s7&display=line)], на годовых данных средней зарплаты в США с 1900 по 1970 год^[[источник данных](https://datamarket.com/data/set/22s1/annual-wages-us-1900-to-1970#!ds=22s1&display=line)] и на квартальных данных о численности жителей Австралии с марта 1971 по март 1993 года^[встроенный набор данных в R]. Представленные ряды обладают линейным трендом, который мы явно укажем при спецификации обеих моделей. 
+
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+# volume of money in Australia
+money <- read.csv("volume-of-money-abs-definition-m_bsts.csv", sep = ",", dec = ',', header = TRUE,
+                 stringsAsFactors = FALSE)
+money$Month <- as.Date(money$Month,format = "%Y-%m-%d")
+# number of residents in Australia
+data('austres')
+res <- window(austres, start=c(1971,2), end=c(1993,2))
+res <- data.frame(as.numeric(res), as.Date(time(res)))
+names(res) <- c("Population", "Date")
+# wages in USA
+wages <- read.csv("annual-wages-us-1900-to-1970.csv", sep = ",", dec = ',', header = TRUE,
+                  stringsAsFactors = FALSE)
+wages$Year <- as.Date(wages$Year,format = "%Y-%m-%d")
+
+```
+
+Изобразим временные ряды:
+
+```{r fig-two-together,fig.height = 1.4,fig.fullwidth = TRUE, fig.show='hold', echo=FALSE}
+g1 <- ggplot(data=money, aes(x=Month)) + 
+  geom_line(aes(y=Vol_money, colour = "#FF0000"),size=0.2)+
+  ylab("Volume of money") + xlab("")+
+  theme(axis.text.x=element_text(hjust = 0), legend.position = 'none',
+        text=element_text(size=3))
+
+g2 <- ggplot(data=res, aes(x=Date)) + 
+  geom_line(aes(y=Population, colour = "#FF0000"),size=0.2)+
+  ylab("Residents (in thousands)") + xlab("")+
+  theme(axis.text.x=element_text(hjust = 0), legend.position = 'none',
+        text=element_text(size=3))
+
+g3 <- ggplot(data=wages, aes(x=Year)) + 
+  geom_line(aes(y=an_wages,colour = "#FF0000"),size=0.2)+
+  ylab("Wages (in dollars)") + xlab("")+
+  theme(axis.text.x=element_text(hjust = 0), legend.position = 'none',
+        text=element_text(size=3)) 
+
+grid.arrange(g1,g2,g3, ncol=3)
+
+```
+
+Обучим модели BSTS и Prophet и сделаем прогнозы на несколько месяцев (лет) вперёд.  Для этого зададим линейный тренд:
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# store the errors of fitting
+bsts_rmse_y <- c()
+bsts_rmse_q <- c()
+bsts_rmse_m <- c()
+bsts_rmse_d <- c()
+
+pr_rmse_y <- c()
+pr_rmse_q <- c()
+pr_rmse_m <- c()
+pr_rmse_d <- c()
+# volume of money in Australia
+# make train data
+training_cut_date <- as.Date(as.character("1993-12-01"),format = "%Y-%m-%d")
+data_train <- money[money$Month <= training_cut_date,]
+yts <- xts(data_train$Vol_money, order.by=data_train$Month)
+```
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+# fit BSTS with trend only
+ss <- AddLocalLinearTrend(list(), yts)
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+model <- bsts(yts, state.specification = ss, niter = 500, seed=2016)
+burn <- SuggestBurn(0.1, model)
+# BSTS predictions
+pred <- predict(model, horizon = 12, burn = burn, quantiles = c(.025, .975))
+
+# actual versus fitted data
+d2 <- data.frame(c(-colMeans(model$one.step.prediction.errors[-(1:burn),])+coredata(yts),pred$mean),
+as.numeric(money$Vol_money), as.Date(money$Month))
+names(d2) <- c("Fitted", "Actual", "Date")
+# RMSE
+RMSE_bs <- filter(d2, year(Date)>1993) %>% summarise(RMSE=(mean((Actual-Fitted)^2))^(1/2))
+bsts_rmse_m <- c(bsts_rmse_m, RMSE_bs)
+# make posterior intervals
+posterior.interval <- cbind.data.frame(
+  pred$interval[1,],pred$interval[2,],subset(d2, year(Date)>1993)$Date)
+names(posterior.interval) <- c("LL", "UL", "Date")
+
+# join intervals to the forecast
+d3 <- left_join(d2, posterior.interval, by="Date")
+
+```
+
+```{r, message=FALSE, warning=FALSE,include=FALSE}
+# Plot actual versus predicted with credible intervals for the holdout period
+theme_set(theme_gray(base_size = 2))
+g1 <- ggplot(data=d3, aes(x=Date)) +
+  geom_line(aes(y=Actual, color='#00FF00'),size=0.3) +
+  geom_line(aes(y=Fitted, color='#FF0000'), linetype=2,size=0.3) +
+  theme_bw()+ ylab("Volume") + xlab("") +
+  geom_vline(xintercept=as.numeric(as.Date("1993-12-01")), linetype=2,size=0.2) + 
+  geom_ribbon(aes(ymin=LL, ymax=UL), fill="grey", alpha=0.5) +
+  ggtitle(paste0("BSTS -- Holdout RMSE = ", round(RMSE_bs,2))) +
+  theme(axis.text.x=element_text(hjust = 0), legend.position = 'none',text=element_text(size=3))
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# fit Prophet with trend only
+yts_df <- data.frame(ds = index(yts), y = yts, row.names=NULL)
+```
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+# fit Prophet with trend only
+m <- prophet(yts_df, growth='linear',yearly.seasonality=FALSE, weekly.seasonality=FALSE)
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+yts_fut <- xts(money$Vol_money, order.by=money$Month)
+future <- data.frame(ds = index(yts_fut), y = yts_fut, row.names=NULL)
+# Prophet predictions
+forecast <- predict(m, future)
+# RMSE
+RMSE_pr <- (mean((tail(money$Vol_money,12)-tail(forecast$yhat,12))^2))^(1/2)
+pr_rmse_m <- c(pr_rmse_m, RMSE_pr)
+# plot results
+theme_set(theme_gray(base_size = 2))
+update_geom_defaults('point', list(size=0.1))
+g2 <- plot(m, forecast,xlabel = "", ylabel = "Volume",size=0.2) +  
+  ggtitle(paste0("Prophet -- Holdout MAPE = ", round(RMSE_pr,2)))+
+  geom_vline(xintercept=as.numeric(as.Date("1993-12-01")), linetype=2,size=0.2)+
+  theme_bw()+theme(text=element_text(size=3))
+
+```
+
+```{r fig.height = 1.5,fig.fullwidth = TRUE, fig.show='hold', echo=FALSE}
+
+grid.arrange(g1,g2, ncol=2)
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# Number of residents in Australia
+# make train data
+training_cut_date <- as.Date(as.character("1990-10-01"),format = "%Y-%m-%d")
+data_train <- res[res$Date <= training_cut_date,]
+yts <- xts(data_train$Population, order.by=data_train$Date)
+# fit BSTS with trend only
+ss <- AddLocalLinearTrend(list(), yts)
+model <- bsts(yts, state.specification = ss, niter = 500, seed=2016)
+burn <- SuggestBurn(0.1, model)
+# BSTS predictions
+pred <- predict(model, horizon = 10, burn = burn, quantiles = c(.025, .975))
+
+# actual versus fitted data
+d2 <- data.frame(c(-colMeans(model$one.step.prediction.errors[-(1:burn),])+coredata(yts),pred$mean),
+as.numeric(res$Population), as.Date(res$Date))
+names(d2) <- c("Fitted", "Actual", "Date")
+# RMSE 
+RMSE_bs <- filter(d2, year(Date)>1990) %>% summarise(RMSE=(mean((Actual-Fitted)^2))^(1/2))
+bsts_rmse_q <- c(bsts_rmse_q, RMSE_bs)
+# make posterior intervals
+posterior.interval <- cbind.data.frame(
+  pred$interval[1,],pred$interval[2,],subset(d2, year(Date)>1990)$Date)
+names(posterior.interval) <- c("LL", "UL", "Date")
+
+# join intervals to the forecast
+d3 <- left_join(d2, posterior.interval, by="Date")
+
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# Plot actual versus predicted with credible intervals for the holdout period
+theme_set(theme_gray(base_size = 2))
+g1 <- ggplot(data=d3, aes(x=Date)) +
+  geom_line(aes(y=Actual, color='#00FF00'),size=0.3) +
+  geom_line(aes(y=Fitted, color='#FF0000'), linetype=2,size=0.3) +
+  theme_bw()+ ylab("Residents") + xlab("") +
+  geom_vline(xintercept=as.numeric(as.Date("1990-10-01")), linetype=2,size=0.2) + 
+  geom_ribbon(aes(ymin=LL, ymax=UL), fill="grey", alpha=0.5) +
+  ggtitle(paste0("BSTS -- Holdout RMSE = ", round(RMSE_bs,2))) +
+  theme(axis.text.x=element_text(hjust = 0), legend.position = 'none',text=element_text(size=3))
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# fit Prophet with trend only
+yts_df <- data.frame(ds = index(yts), y = yts, row.names=NULL)
+m <- prophet(yts_df, growth='linear',yearly.seasonality=FALSE, weekly.seasonality=FALSE)
+
+yts_fut <- xts(res$Population, order.by=res$Date)
+future <- data.frame(ds = index(yts_fut), y = yts_fut, row.names=NULL)
+# Prophet predictions
+forecast <- predict(m, future)
+# RMSE 
+RMSE_pr <- (mean((tail(res$Population,10)-tail(forecast$yhat,10))^2))^(1/2)
+pr_rmse_q <- c(pr_rmse_q, RMSE_pr)
+# plot results
+theme_set(theme_gray(base_size = 2))
+update_geom_defaults('point', list(size=0.1))
+g2 <- plot(m, forecast,xlabel = "", ylabel = "Residents",size=0.2) +  
+  ggtitle(paste0("Prophet -- Holdout RMSE = ", round(RMSE_pr,2)))+  
+  geom_vline(xintercept=as.numeric(as.Date("1990-10-01")), linetype=2,size=0.2)+
+  theme_bw()+theme(text=element_text(size=3))
+
+```
+
+```{r fig.height = 1.5,fig.fullwidth = TRUE, fig.show='hold', echo=FALSE}
+
+grid.arrange(g1,g2, ncol=2)
+```
+
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# wages in USA
+# make train data
+wages <- read.csv("annual-wages-us-1900-to-1970.csv", sep = ",", dec = ',', header = TRUE,
+                  stringsAsFactors = FALSE)
+wages$Year <- as.Date(wages$Year,format = "%Y-%m-%d")
+
+training_cut_date <- as.Date(as.character("1962-01-01"),format = "%Y-%m-%d")
+data_train <- wages[wages$Year <= training_cut_date,]
+yts <- xts(data_train$an_wages, order.by=data_train$Year)
+# fit BSTS with trend only
+ss <- AddLocalLinearTrend(list(), yts)
+model <- bsts(yts, state.specification = ss, niter = 500, seed=2016)
+burn <- SuggestBurn(0.1, model)
+# BSTS predictions
+pred <- predict(model, horizon = 8, burn = burn, quantiles = c(.025, .975))
+
+# actual versus fitted data
+d2 <- data.frame(c(-colMeans(model$one.step.prediction.errors[-(1:burn),])+coredata(yts),pred$mean),
+as.numeric(wages$an_wages), as.Date(wages$Year))
+names(d2) <- c("Fitted", "Actual", "Date")
+# RMSE
+RMSE_bs <- filter(d2, year(Date)>1962) %>% summarise(RMSE=(mean((Actual-Fitted)^2))^(1/2))
+bsts_rmse_y <- c(bsts_rmse_y, RMSE_bs)
+# make posterior intervals
+posterior.interval <- cbind.data.frame(
+  pred$interval[1,],pred$interval[2,],subset(d2, year(Date)>1962)$Date)
+names(posterior.interval) <- c("LL", "UL", "Date")
+
+# join intervals to the forecast
+d3 <- left_join(d2, posterior.interval, by="Date")
+
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# Plot actual versus predicted with credible intervals for the holdout period
+theme_set(theme_gray(base_size = 2))
+g1 <- ggplot(data=d3, aes(x=Date)) +
+  geom_line(aes(y=Actual, color='#00FF00'),size=0.3) +
+  geom_line(aes(y=Fitted, color='#FF0000'), linetype=2,size=0.3) +
+  theme_bw()+ ylab("Wages") + xlab("") +
+  geom_vline(xintercept=as.numeric(as.Date("1962-01-01")), linetype=2,size=0.2) + 
+  geom_ribbon(aes(ymin=LL, ymax=UL), fill="grey", alpha=0.5) +
+  ggtitle(paste0("BSTS -- Holdout RMSE = ", round(RMSE_bs,2))) +
+  theme(axis.text.x=element_text(hjust = 0), legend.position = 'none',text=element_text(size=3))
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# fit Prophet with trend only
+yts_df <- data.frame(ds = index(yts), y = yts, row.names=NULL)
+m <- prophet(yts_df, growth='linear',yearly.seasonality=FALSE, weekly.seasonality=FALSE)
+
+yts_fut <- xts(wages$an_wages, order.by=wages$Year)
+future <- data.frame(ds = index(yts_fut), y = yts_fut, row.names=NULL)
+# Prophet predictions
+forecast <- predict(m, future)
+# RMSE 
+RMSE_pr <- (mean((tail(wages$an_wages,8)-tail(forecast$yhat,8))^2))^(1/2)
+pr_rmse_y <- c(pr_rmse_y, RMSE_pr)
+# plot results
+theme_set(theme_gray(base_size = 2))
+update_geom_defaults('point', list(size=0.1))
+g2 <- plot(m, forecast,xlabel = "", ylabel = "Wages",size=0.2) +  
+  ggtitle(paste0("Prophet -- Holdout RMSE = ", round(RMSE_pr,2)))+  
+  geom_vline(xintercept=as.numeric(as.Date("1962-01-01")), linetype=2,size=0.2)+
+  theme_bw()+theme(text=element_text(size=3))
+
+```
+
+```{r fig.height = 1.5,fig.fullwidth = TRUE, fig.show='hold', echo=FALSE}
+
+grid.arrange(g1,g2, ncol=2)
+```
+
+Из полученных прогнозов и значений _RMSE_ видно, что оба алгоритма показали хорошее качество работы с трендом, при этом модель локального линейного тренда BSTS обладает меньшим значением ошибки прогнозов, чем модель линейного тренда Prophet, лучше настраиваясь на данные.
+
+
+## Локальный линейный тренд и сезонность
+Рассмотрим пример работы BSTS и Prophet на месячных данных объёма производства молока (в фунтах на корову) с января 1962 по декабрь 1975 года^[[источник данных](https://datamarket.com/data/set/22ox/monthly-milk-production-pounds-per-cow-jan-62-dec-75#!ds=22ox&display=line)], на месячных данных уровня углекислого газа у вулкана Мауна-Лоа с января 1965 по декабрь 1980 года^[[источник данных](https://datamarket.com/data/set/22v1/co2-ppm-mauna-loa-1965-1980#!ds=22v1&display=line)], на месячных данных производства электричества в Австралии с января 1956 по август 1995 года^[[источник данных](https://datamarket.com/data/set/22l0/monthly-electricity-production-in-australia-million-kilowatt-hours-jan-1956-aug-1995#!ds=22l0&display=line)]. Представленные ряды обладают сезонностью и линейным трендом, который мы явно укажем при спецификации обеих моделей.
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+# milk production
+milk <- read.csv("monthly-milk-production-pounds-p.csv", sep = ",", dec = ',', header = TRUE,
+                 stringsAsFactors = FALSE)
+milk$Month <- as.Date(milk$Month,format = "%Y-%m-%d")
+# CO2 level
+carbon <- read.csv("co2-ppm-mauna-loa.csv", sep = ",", dec = '.', header = TRUE,
+                 stringsAsFactors = FALSE)
+carbon$Month <- as.Date(carbon$Month,format = "%Y-%m-%d")
+# electricity production
+elec <- read.csv("monthly-electricity-production-i.csv", sep = ",", dec = ',', header = TRUE,
+                  stringsAsFactors = FALSE)
+elec$Month <- as.Date(elec$Month,format = "%Y-%m-%d")
+
+```
+
+Изобразим временные ряды:
+
+```{r fig.height = 1.5,fig.fullwidth = TRUE, fig.show='hold', echo=FALSE}
+g1 <- ggplot(data=milk, aes(x=Month)) + 
+  geom_line(aes(y=milk, colour = "#FF0000"),size=0.2)+
+  ylab("Production of milk") + xlab("")+
+  theme(axis.text.x=element_text(hjust = 0), legend.position = 'none',
+        text=element_text(size=4))
+
+g2 <- ggplot(data=carbon, aes(x=Month)) + 
+  geom_line(aes(y=co2, colour = "#FF0000"),size=0.2)+
+  ylab("CO2 level") + xlab("")+
+  theme(axis.text.x=element_text(hjust = 0), legend.position = 'none',
+        text=element_text(size=4))
+
+g3 <- ggplot(data=elec, aes(x=Month)) + 
+  geom_line(aes(y=electr,colour = "#FF0000"),size=0.2)+
+  ylab("Electricity production") + xlab("")+
+  theme(axis.text.x=element_text(hjust = 0), legend.position = 'none',
+        text=element_text(size=4)) 
+
+grid.arrange(g1,g2,g3, ncol=3)
+
+```
+
+
+Обучим модели BSTS и Prophet и сделаем прогнозы на несколько месяцев (лет) вперёд.  Для этого зададим  тренд и сезонность:
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# milk production
+# make train data
+training_cut_date <- as.Date(as.character("1974-12-01"),format = "%Y-%m-%d")
+data_train <- milk[milk$Month <= training_cut_date,]
+yts <- xts(data_train$milk, order.by=data_train$Month)
+```
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+# fit BSTS with trend and seasonal component
+ss <- AddLocalLinearTrend(list(), yts)
+ss <- AddSeasonal(ss, yts, nseasons = 12)
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+model <- bsts(yts, state.specification = ss, niter = 500, seed=2016)
+burn <- SuggestBurn(0.1, model)
+# BSTS predictions
+pred <- predict(model, horizon = 12, burn = burn, quantiles = c(.025, .975))
+
+# actual versus fitted data
+d2 <- data.frame(c(-colMeans(model$one.step.prediction.errors[-(1:burn),])+coredata(yts),pred$mean),
+as.numeric(milk$milk), as.Date(milk$Month))
+names(d2) <- c("Fitted", "Actual", "Date")
+# RMSE 
+RMSE_bs <- filter(d2, year(Date)>1974) %>% summarise(RMSE=(mean((Actual-Fitted)^2))^(1/2))
+bsts_rmse_m <- c(bsts_rmse_m, RMSE_bs)
+# make posterior intervals
+posterior.interval <- cbind.data.frame(
+  pred$interval[1,],pred$interval[2,],subset(d2, year(Date)>1974)$Date)
+names(posterior.interval) <- c("LL", "UL", "Date")
+
+# join intervals to the forecast
+d3 <- left_join(d2, posterior.interval, by="Date")
+
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# Plot actual versus predicted with credible intervals for the holdout period
+theme_set(theme_gray(base_size = 2))
+g1 <- ggplot(data=d3, aes(x=Date)) +
+  geom_line(aes(y=Actual, color='#00FF00'),size=0.3) +
+  geom_line(aes(y=Fitted, color='#FF0000'), linetype=2,size=0.3) +
+  theme_bw()+ ylab("Milk") + xlab("") +
+  geom_vline(xintercept=as.numeric(as.Date("1974-12-01")), linetype=2,size=0.2) + 
+  geom_ribbon(aes(ymin=LL, ymax=UL), fill="grey", alpha=0.5) +
+  ggtitle(paste0("BSTS -- Holdout RMSE = ", round(RMSE_bs,2))) +
+  theme(axis.text.x=element_text(hjust = 0), legend.position = 'none',text=element_text(size=3))
+
+# Extract the components
+components <- cbind.data.frame(
+  colMeans(model$state.contributions[-(1:burn),"trend",]),                               
+  colMeans(model$state.contributions[-(1:burn),"seasonal.12.1",]),
+  as.Date(data_train$Month)) 
+names(components) <- c("Trend", "Seasonality", "Date")
+components <- melt(components, id="Date")
+names(components) <- c("Date", "Component", "Value")
+
+# Plot
+decom_bs <- ggplot(data=components, aes(x=Date, y=Value)) + geom_line(color="#FF0000",size=0.2) + 
+   ylab("") + xlab("") + facet_grid(Component ~ ., scales="free", switch = "both") +
+  theme(strip.background = element_blank(),text=element_text(size=3))  
+  
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+yts_df <- data.frame(ds = index(yts), y = yts, row.names=NULL)
+```
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+# fit Prophet with trend and seasonal
+m <- prophet(yts_df, growth='linear',yearly.seasonality="auto", weekly.seasonality=FALSE)
+```
+
+Изобразим прогнозы, а также компоненты^[Стоит отметить особенность функции _prophet\_plot\_components()_ для построения компонент ряда: данная функция возвращает список из графиков для каждой компоненты, поэтому изображение для отдельной компоненты _i_ можно получить как _prophet\_plot\_components()[[i]]_] (тренд и сезонность), которые мы явно указывали при моделировании временных рядов. Извлечение составляющих временного ряда является одним из преимуществ моделей BSTS и Prophet перед ARIMA-моделью, в которой данные компоненты удаляются с помощью дифференцирования и не анализируются.
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+yts_fut <- xts(milk$milk, order.by=milk$Month)
+future <- data.frame(ds = index(yts_fut), y = yts_fut, row.names=NULL)
+# Prophet predictions
+forecast <- predict(m, future)
+# RMSE 
+RMSE_pr <- (mean((tail(milk$milk,12)-tail(forecast$yhat,12))^2))^(1/2)
+pr_rmse_m <- c(pr_rmse_m, RMSE_pr)
+# plot results
+theme_set(theme_gray(base_size = 2))
+update_geom_defaults('point', list(size=0.1))
+g2 <- plot(m, forecast,xlabel = "", ylabel = "Milk",size=0.3) +  
+  ggtitle(paste0("Prophet -- Holdout RMSE = ", round(RMSE_pr,2)))+
+  geom_vline(xintercept=as.numeric(as.Date("1974-12-01")), linetype=2,size=0.2)+
+  theme_bw()+theme(text=element_text(size=3))
+
+```
+
+```{r fig.height = 1.5,fig.fullwidth = TRUE, fig.show='hold', echo=FALSE}
+
+grid.arrange(g1,g2, ncol=2)
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+left_col <- plot_grid(prophet_plot_components(m, forecast)[[1]], 
+                      prophet_plot_components(m, forecast)[[2]], ncol=1)
+```
+
+```{r fig.height = 1.5,fig.fullwidth = TRUE, fig.show='hold',message=FALSE, warning=FALSE,echo=FALSE}
+plot_grid(decom_bs,left_col, align = 'h')
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# CO2 level
+# make train data
+training_cut_date <- as.Date(as.character("1979-12-01"),format = "%Y-%m-%d")
+data_train <- carbon[carbon$Month <= training_cut_date,]
+yts <- xts(data_train$co2, order.by=data_train$Month)
+# fit BSTS with trend and seasonal
+ss <- AddLocalLinearTrend(list(), yts)
+ss <- AddSeasonal(ss, yts, nseasons = 12)
+model <- bsts(yts, state.specification = ss, niter = 500, seed=2016)
+burn <- SuggestBurn(0.1, model)
+# BSTS predictions
+pred <- predict(model, horizon = 12, burn = burn, quantiles = c(.025, .975))
+
+# actual versus fitted data
+d2 <- data.frame(c(-colMeans(model$one.step.prediction.errors[-(1:burn),])+coredata(yts),pred$mean),
+as.numeric(carbon$co2), as.Date(carbon$Month))
+names(d2) <- c("Fitted", "Actual", "Date")
+# RMSE 
+RMSE_bs <- filter(d2, year(Date)>1979) %>% summarise(RMSE=(mean((Actual-Fitted)^2))^(1/2))
+bsts_rmse_m <- c(bsts_rmse_m, RMSE_bs)
+# make posterior intervals
+posterior.interval <- cbind.data.frame(
+  pred$interval[1,],pred$interval[2,],subset(d2, year(Date)>1979)$Date)
+names(posterior.interval) <- c("LL", "UL", "Date")
+
+# join intervals to the forecast
+d3 <- left_join(d2, posterior.interval, by="Date")
+
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# Plot actual versus predicted with credible intervals for the holdout period
+theme_set(theme_gray(base_size = 2))
+g1 <- ggplot(data=d3, aes(x=Date)) +
+  geom_line(aes(y=Actual, color='#00FF00'),size=0.3) +
+  geom_line(aes(y=Fitted, color='#FF0000'), linetype=2,size=0.3) +
+  theme_bw()+ ylab("CO2 level") + xlab("") +
+  geom_vline(xintercept=as.numeric(as.Date("1979-12-01")), linetype=2,size=0.2) + 
+  geom_ribbon(aes(ymin=LL, ymax=UL), fill="grey", alpha=0.5) +
+  ggtitle(paste0("BSTS -- Holdout RMSE = ", round(RMSE_bs,2))) +
+  theme(axis.text.x=element_text(hjust = 0), legend.position = 'none',text=element_text(size=3))
+
+# Extract the components
+components <- cbind.data.frame(
+  colMeans(model$state.contributions[-(1:burn),"trend",]),                               
+  colMeans(model$state.contributions[-(1:burn),"seasonal.12.1",]),
+  as.Date(data_train$Month)) 
+names(components) <- c("Trend", "Seasonality", "Date")
+components <- melt(components, id="Date")
+names(components) <- c("Date", "Component", "Value")
+
+# Plot
+decom_bs <- ggplot(data=components, aes(x=Date, y=Value)) + geom_line(color="#FF0000",size=0.2) + 
+   ylab("") + xlab("") + facet_grid(Component ~ ., scales="free", switch = "both") +
+  theme(strip.background = element_blank(),text=element_text(size=3))  
+
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# fit Prophet with trend and seasonal
+yts_df <- data.frame(ds = index(yts), y = yts, row.names=NULL)
+m <- prophet(yts_df, growth='linear',yearly.seasonality="auto", weekly.seasonality=FALSE)
+
+yts_fut <- xts(carbon$co2, order.by=carbon$Month)
+future <- data.frame(ds = index(yts_fut), y = yts_fut, row.names=NULL)
+# Prophet predictions
+forecast <- predict(m, future)
+# RMSE 
+RMSE_pr <- (mean((tail(carbon$co2,12)-tail(forecast$yhat,12))^2))^(1/2)
+pr_rmse_m <- c(pr_rmse_m, RMSE_pr)
+# plot results
+theme_set(theme_gray(base_size = 2))
+update_geom_defaults('point', list(size=0.1))
+g2 <- plot(m, forecast,xlabel = "", ylabel = "CO2 level",size=0.3) +  
+  ggtitle(paste0("Prophet -- Holdout RMSE = ", round(RMSE_pr,2)))+
+  geom_vline(xintercept=as.numeric(as.Date("1979-12-01")), linetype=2,size=0.2)+
+  theme_bw()+theme(text=element_text(size=3))
+
+```
+
+```{r fig.height = 1.5,fig.fullwidth = TRUE, fig.show='hold', echo=FALSE}
+
+grid.arrange(g1,g2, ncol=2)
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+left_col <- plot_grid(prophet_plot_components(m, forecast)[[1]], 
+                      prophet_plot_components(m, forecast)[[2]], ncol=1)
+```
+
+```{r fig.height = 1.5,fig.fullwidth = TRUE, fig.show='hold',message=FALSE, warning=FALSE,echo=FALSE}
+plot_grid(decom_bs,left_col, align = 'h')
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# electricity production
+# make train data
+elec <- read.csv("monthly-electricity-production-i.csv", sep = ",", dec = ',', header = TRUE,
+                  stringsAsFactors = FALSE)
+elec$Month <- as.Date(elec$Month,format = "%Y-%m-%d")
+
+
+training_cut_date <- as.Date(as.character("1993-12-01"),format = "%Y-%m-%d")
+data_train <- elec[elec$Month <= training_cut_date,]
+yts <- xts(data_train$electr, order.by=data_train$Month)
+# fit BSTS with trend and seasonal
+ss <- AddLocalLinearTrend(list(), yts)
+ss <- AddSeasonal(ss, yts, nseasons = 30)
+model <- bsts(yts, state.specification = ss, niter = 500, seed=2016)
+burn <- SuggestBurn(0.1, model)
+# BSTS predictions
+pred <- predict(model, horizon = 20, burn = burn, quantiles = c(.025, .975))
+
+# actual versus fitted data
+d2 <- data.frame(c(-colMeans(model$one.step.prediction.errors[-(1:burn),])+coredata(yts),pred$mean),
+as.numeric(elec$electr), as.Date(elec$Month))
+names(d2) <- c("Fitted", "Actual", "Date")
+# RMSE 
+RMSE_bs <- filter(d2, year(Date)>1993) %>% summarise(RMSE=(mean((Actual-Fitted)^2))^(1/2))
+bsts_rmse_m <- c(bsts_rmse_m, RMSE_bs)
+# make posterior intervals
+posterior.interval <- cbind.data.frame(
+  pred$interval[1,],pred$interval[2,],subset(d2, year(Date)>1993)$Date)
+names(posterior.interval) <- c("LL", "UL", "Date")
+
+# join intervals to the forecast
+d3 <- left_join(d2, posterior.interval, by="Date")
+
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# Plot actual versus predicted with credible intervals for the holdout period
+theme_set(theme_gray(base_size = 2))
+g1 <- ggplot(data=d3, aes(x=Date)) +
+  geom_line(aes(y=Actual, color='#00FF00'),size=0.3) +
+  geom_line(aes(y=Fitted, color='#FF0000'), linetype=2,size=0.3) +
+  theme_bw()+ ylab("Electricity production") + xlab("") +
+  geom_vline(xintercept=as.numeric(as.Date("1993-12-01")), linetype=2,size=0.2) + 
+  geom_ribbon(aes(ymin=LL, ymax=UL), fill="grey", alpha=0.5) +
+  ggtitle(paste0("BSTS -- Holdout RMSE = ", round(RMSE_bs,2))) +
+  theme(axis.text.x=element_text(hjust = 0), legend.position = 'none',text=element_text(size=3))
+
+# Extract the components
+components <- cbind.data.frame(
+  colMeans(model$state.contributions[-(1:burn),"trend",]),                               
+  colMeans(model$state.contributions[-(1:burn),"seasonal.30.1",]),
+  as.Date(data_train$Month)) 
+names(components) <- c("Trend", "Seasonality", "Date")
+components <- melt(components, id="Date")
+names(components) <- c("Date", "Component", "Value")
+
+# Plot
+decom_bs <- ggplot(data=components, aes(x=Date, y=Value)) + geom_line(color="#FF0000",size=0.2) + 
+   ylab("") + xlab("") + facet_grid(Component ~ ., scales="free", switch = "both") +
+  theme(strip.background = element_blank(),text=element_text(size=3)) 
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# fit Prophet with trend and seasonal
+yts_df <- data.frame(ds = index(yts), y = yts, row.names=NULL)
+m <- prophet(yts_df, growth='linear',yearly.seasonality="auto", weekly.seasonality=FALSE)
+
+yts_fut <- xts(elec$electr, order.by=elec$Month)
+future <- data.frame(ds = index(yts_fut), y = yts_fut, row.names=NULL)
+# Prophet predictions
+forecast <- predict(m, future)
+# RMSE 
+RMSE_pr <- (mean((tail(elec$electr,20)-tail(forecast$yhat,20))^2))^(1/2)
+pr_rmse_m <- c(pr_rmse_m, RMSE_pr)
+# plot results
+theme_set(theme_gray(base_size = 2))
+update_geom_defaults('point', list(size=0.1))
+g2 <- plot(m, forecast,xlabel = "", ylabel = "Electricity production",size=0.3) +  
+  ggtitle(paste0("Prophet -- Holdout RMSE = ", round(RMSE_pr,2)))+
+  geom_vline(xintercept=as.numeric(as.Date("1993-12-01")), linetype=2,size=0.2)+
+  theme_bw()+theme(text=element_text(size=3))
+
+```
+
+```{r fig.height = 1.5,fig.fullwidth = TRUE, fig.show='hold', echo=FALSE}
+
+grid.arrange(g1,g2, ncol=2)
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+left_col <- plot_grid(prophet_plot_components(m, forecast)[[1]], 
+                      prophet_plot_components(m, forecast)[[2]], ncol=1)
+```
+
+```{r fig.height = 1.5,fig.fullwidth = TRUE, fig.show='hold',message=FALSE, warning=FALSE,echo=FALSE}
+plot_grid(decom_bs,left_col, align = 'h')
+```
+
+\newpage
+Из полученных прогнозов и значений _RMSE_ видно, что оба алгоритма показали хорошее качество подгонки тренда и сезонности, при этом модель локального линейного тренда и сезонности BSTS обладает меньшим значением ошибки прогнозов, чем модель линейного тренда и сезонности Prophet.
+
+Стоит, однако, отметить преимущество Prophet по сравнению с BSTS в работе с пропущенными значениями временного ряда: Prophet устойчив к пропускам в данных; BSTS пытается заполнить пропуски, что приводит к несовпадению размерностей прогнозов и истинных значений (поэтому перед применением BSTS нужно убедиться, что пропуски в данных заполнены каким-то значением).
+
+[(Ссылка на репозиторий с используемыми данными и кодом)](https://github.com/VictoriaShramova/bsts_prophet_code)
+
+\nocite{*}
+
+
+
+
